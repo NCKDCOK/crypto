@@ -272,7 +272,7 @@ function renderHeroCard(s) {
         </div>
         <div style="display:flex;gap:6px;align-items:center">
           <span class="badge badge-state-${s.state}">${s.state_display || s.state_label || s.state}</span>
-          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${s.direction_label || dir}</span>` : ''}
+          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${s.direction_label || (dir === 'LONG' ? '做多' : dir === 'SHORT' ? '做空' : dir)}</span>` : ''}
         </div>
       </div>
       <div class="hero-body">
@@ -475,7 +475,7 @@ function renderMarket(view) {
         <td class="num">${opp != null ? fmt(opp, 1) : '-'}</td>
         <td class="num">${conf != null ? fmt(conf, 0) + '%' : '-'}</td>
         <td><span class="badge badge-state-${s.state}">${s.state_label || s.state}</span></td>
-        <td>${dir ? `<span class="badge badge-${dir.toLowerCase()}">${s.direction_label || dir}</span>` : '-'}</td>
+        <td>${dir ? `<span class="badge badge-${dir.toLowerCase()}">${s.direction_label || (dir === 'LONG' ? '做多' : dir === 'SHORT' ? '做空' : dir)}</span>` : '-'}</td>
         <td class="num">${capScore != null ? fmt(capScore, 0) : '-'}</td>
         <td class="num">${stamScore != null ? fmt(stamScore, 0) : '-'}</td>
         <td class="num ${pctColor(s.price_change_24h)}">${fmtPct(s.price_change_24h)}</td>
@@ -552,7 +552,7 @@ function renderDetailContent(d, isPreview) {
     html += `<div class="detail-symbol">${d.symbol}</div>`;
     html += `<div style="display:flex;gap:6px">
       <span class="badge badge-state-${d.state}">${d.state_display || d.state_label || d.state}</span>
-      ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${d.direction_label || dir}</span>` : ''}
+      ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${d.direction_label || (dir === 'LONG' ? '做多' : dir === 'SHORT' ? '做空' : dir)}</span>` : ''}
     </div>`;
   }
   html += `</div>`;
@@ -718,6 +718,7 @@ function renderSignals(view) {
   let html = '<div class="card-grid">';
   for (const s of sorted.slice(0, 50)) {
     const dir = s.direction || '';
+    const dirLabel = s.direction_label || (dir === 'LONG' ? '做多' : dir === 'SHORT' ? '做空' : '');
     html += `
       <div class="card" onclick="navigate('/symbol/${s.symbol}')">
         <div class="card-header">
@@ -725,11 +726,12 @@ function renderSignals(view) {
           <span class="badge badge-state-${s.state}">${s.state_display || s.state_label || s.state}</span>
         </div>
         <div class="card-price" style="margin-bottom:4px">
-          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${s.direction_label || dir}</span>` : ''}
+          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${dirLabel}</span>` : ''}
         </div>
         <div class="card-summary">
           <span class="text-muted">${ts(s.asof)}</span>
           ${s.evidence_count ? ` · 证据 ${s.evidence_count}` : ''}
+          ${s.veto_count ? ` · 否决 ${s.veto_count}` : ''}
         </div>
       </div>`;
   }
@@ -763,7 +765,7 @@ function renderHealth(view) {
       <table class="health-table">
         <thead>
           <tr>
-            <th>Symbol</th>
+            <th>交易对</th>
             <th>AggTrade</th>
             <th>Kline</th>
             <th>OI</th>
@@ -779,14 +781,16 @@ function renderHealth(view) {
       const stream = row[prefix];
       if (stream) {
         const status = stream.status || 'FAIL';
-        html += `<td><span class="status-cell health-${status}"><span class="dot"></span>${status}</span></td>`;
+        const statusLabel = stream.status_label || status;
+        html += `<td><span class="status-cell health-${status}"><span class="dot"></span>${escapeHtml(statusLabel)}</span></td>`;
       } else {
         html += `<td>-</td>`;
       }
     }
     const conf = row.confidence_state || 'UNKNOWN';
+    const confLabel = row.confidence_state_label || conf;
     const confClass = conf === 'CONFIDENT' ? 'text-long' : conf === 'DEGRADED' ? 'text-short' : 'text-short';
-    html += `<td class="${confClass}" style="font-weight:600">${conf}</td>`;
+    html += `<td class="${confClass}" style="font-weight:600">${escapeHtml(confLabel)}</td>`;
     html += `</tr>`;
   }
 

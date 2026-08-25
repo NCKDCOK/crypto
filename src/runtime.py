@@ -1027,18 +1027,31 @@ class MarketRadarRuntime:
 
     def get_health(self) -> list[dict[str, Any]]:
         """数据健康表。"""
+        # HealthLevel → 中文
+        health_labels = {
+            "OK": "正常", "WARN": "预热中", "STALE": "数据延迟",
+            "DRIFT": "数据偏移", "FAIL": "数据异常",
+        }
+        # ConfidenceState → 中文
+        conf_labels = {
+            "CONFIDENT": "可信", "DEGRADED": "降级", "UNKNOWN": "不足",
+        }
         result = []
         for sym in self.deep_scanner.symbols:
             row = {"symbol": sym}
             for prefix in (STREAM_AGGTRADE, STREAM_KLINE, STREAM_OI, STREAM_FUNDING):
                 hs = self.watchdog.check_health(f"{prefix}:{sym}")
+                raw_status = hs.status.value
                 row[prefix] = {
-                    "status": hs.status.value,
+                    "status": raw_status,
+                    "status_label": health_labels.get(raw_status, raw_status),
                     "age_ms": hs.age_ms,
                     "connected": hs.connected,
                     "last_event_time": hs.last_event_time,
                 }
-            row["confidence_state"] = self.confidence.get(sym).value
+            raw_conf = self.confidence.get(sym).value
+            row["confidence_state"] = raw_conf
+            row["confidence_state_label"] = conf_labels.get(raw_conf, raw_conf)
             result.append(row)
         return result
 
@@ -1050,7 +1063,10 @@ class MarketRadarRuntime:
         return [{
             "symbol": e.symbol,
             "state": e.new_state.value,
+            "state_label": PresentationTranslator.state_label(e.new_state),
+            "state_display": PresentationTranslator.state_display(e.new_state),
             "direction": e.direction.value if e.direction else None,
+            "direction_label": PresentationTranslator.direction_label(e.direction),
             "asof": e.asof,
             "evidence_count": len(e.evidence),
             "veto_count": len(e.vetoes),
