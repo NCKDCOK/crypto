@@ -1,0 +1,15 @@
+# Data Health 配置
+# 依据 docs/DATA_HEALTH.md
+freshness:
+  aggtrade_active_ms: 5000
+  aggtrade_low_activity_ms: 30000
+  kline_1m_ms: 90000
+  oi_poller_multiplier: 2
+  funding_premium_ms: 60000
+  oi_lookup_tolerance_ms: 15000
+
+rate_limiter:
+  weight_limit_per_minute: 1200
+  initial_backoff_ms: 1000
+  max_backoff_ms: 60000
+  circuit_breaker_threshold: 3

@@ -1,0 +1,4 @@
+# 特征配置
+# 依据 docs/ANALYSIS_MODEL.md
+baseline_window: 1h
+epsilon: 1.0  # FlowImpact 的 ε（USDT 名义）

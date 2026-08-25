@@ -1,0 +1,7 @@
+# 检测器阈值配置
+# 依据 docs/ANALYSIS_MODEL.md
+# V1 仅 anomaly 阈值；startup/false-start veto 阈值后续 Gate 补充
+anomaly_volume_z: 3.0
+anomaly_trade_count_z: 3.0
+anomaly_price_accel_z: 2.5
+anomaly_taker_delta_z: 2.5

@@ -1,0 +1,8 @@
+# 状态机配置
+# 依据 docs/STATE_MACHINE.md §10.2
+anomaly_decay_window: 30s
+confirmation_hold: 15s
+continuation_hold: 30s
+exhaustion_confirm: 1m
+withdrawal_confirm: 1m
+cooldown_seconds: 300

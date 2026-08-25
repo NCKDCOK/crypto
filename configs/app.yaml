@@ -1,0 +1,8 @@
+# 全局应用配置
+exchange: binance
+ws_base_url: wss://fstream.binance.com
+ws_route_market: /market
+ws_route_public: /public
+rest_base_url: https://fapi.binance.com
+max_streams_per_connection: 1024
+connection_max_lifetime_hours: 24

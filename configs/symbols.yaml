@@ -1,0 +1,6 @@
+# Symbol 过滤与分级配置
+quote_asset: USDT
+exclude_patterns: []
+activity_tiers:
+  active: 50000000   # 24h 成交额 > 50M USDT
+  normal: 5000000    # > 5M USDT

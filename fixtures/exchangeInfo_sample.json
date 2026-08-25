@@ -1,0 +1,47 @@
+{
+  "symbols": [
+    {
+      "symbol": "BTCUSDT",
+      "pair": "BTCUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "onboardDate": 1569398400000
+    },
+    {
+      "symbol": "ETHUSDT",
+      "pair": "ETHUSDT",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "ETH",
+      "quoteAsset": "USDT",
+      "onboardDate": 1569398400000
+    },
+    {
+      "symbol": "BTCUSDT_240329",
+      "pair": "BTCUSDT",
+      "contractType": "CURRENT_QUARTER",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "USDT",
+      "onboardDate": 1569398400000
+    },
+    {
+      "symbol": "DELISTEDUSDT",
+      "pair": "DELISTEDUSDT",
+      "contractType": "PERPETUAL",
+      "status": "DELISTED",
+      "baseAsset": "DELISTED",
+      "quoteAsset": "USDT"
+    },
+    {
+      "symbol": "BTCBUSD",
+      "pair": "BTCBUSD",
+      "contractType": "PERPETUAL",
+      "status": "TRADING",
+      "baseAsset": "BTC",
+      "quoteAsset": "BUSD"
+    }
+  ]
+}
