@@ -1,5 +1,93 @@
 # CHANGELOG
 
+## [V1.1] — 2026-08-26 — Runtime 修复 + 评分体系 + Top10 大屏 + UI 产品化
+
+依据《资金行为雷达_V1.1》计划（19 步骤）。在后端修复 6 个 P0 问题、引入可解释评分体系、翻译层、Top10 排名，并从 100 行内联 HTML 升级为 6 页面 SPA 大屏。
+
+### Runtime 修复 (P0)
+
+- **P0.1 修复 Candidate≈Universe**：`LightScanner.scan()` 不再使用 `score > 0` 逻辑；改为至少 N 个增量 z-score 超阈值才成候选。
+- **P0.2 Stage1 改短时增量**：不再用 24h 累计值；计算相邻采样增量（ΔQuoteVolume/ΔTradeCount/ΔPricePct）+ delta z-score，维护 rolling baseline。
+- **P0.3 多周期 Kline**：`KlineCollector` 支持多周期订阅；DeepScanner 订阅 1m/5m/15m/1h 全部周期（之前仅 1m）。
+- **P0.4 候选防抖**：BaseWSCollector 新增 `subscribe()`/`unsubscribe()` 增量方法；DeepScanner 集合变化时增量增删而非整组重连；Runtime 加入防抖逻辑（最低驻留 180s + 连续跌出 3 次才移除）。FreshnessWatchdog 新增 `unregister_stream()`。OI/Funding poller 新增 `add_symbol()`/`remove_symbol()`。
+- **P0.5 修复"数据 false"**：`get_stats()` 输出人类可读 `data_status`（数据正常/数据降级/数据延迟/数据异常）；main.py 不再显示布尔值。
+- **P0.6 统一 Dashboard**：旧 `DashboardService` 标记 DEPRECATED；main.py 直接使用 MarketRadarRuntime。
+
+### 评分引擎 (`src/scoring/`)
+
+- **ScoreEngine**：11 个子评分（7 基础 + 4 风险），每个 0~100，可展开 components。
+- OpportunityScore = 加权基础分 - 风险扣分（risk_penalty_scale 缩放）。
+- 评分预热：样本不足时不评分（`warmup_min_samples`）。
+- 权重全部配置化（`configs/scoring.yaml`），禁止 magic number。
+- 修复 `_sigmoid_z` 极端值 `math.exp` 溢出 bug（限制指数参数 [-700, 700]）。
+
+### 置信度引擎 (`src/scoring/confidence.py`)
+
+- **ConfidenceEngine**：独立于机会分，受数据健康/证据完整性/缺失源/多窗口一致性影响。
+- 输出数值置信度 0.0~1.0 + penalties 列表。
+
+### 翻译层 (`src/presentation/translator.py`)
+
+- **PresentationTranslator**：内部术语 → 用户中文。
+- 状态翻译（ANOMALY→发现异动、START_CONFIRMED→🚀启动确认...）+ emoji。
+- 资金行为模块翻译（主动买盘/新增仓位/资金持续性/拥挤程度/撤离迹象）。
+- 量价模块翻译（成交量/价格推动效率/回踩承接/突破有效性）。
+- 假启动检查翻译（✅/❌ + 中文检查项）。
+- 一句话结论生成（规则生成，非大模型）。
+- "还缺什么"提示（SUSPECTED_START 状态下）。
+
+### Top10 排名 (`src/presentation/ranking.py`)
+
+- RankingScore = OpportunityScore × ConfidenceFactor。
+- 排除规则：UNKNOWN / 评分不可用 / stale 不进入 Top10。
+- 系统结论生成（规则生成）。
+
+### UI 大屏 (`static/`)
+
+- **SPA 架构**：原生 HTML/CSS/JS，FastAPI 静态托管，无构建系统。
+- **6 页面**：首页 Top10 / 全市场搜索 / 币种详情 / 信号中心 / 数据健康 / 回放验证。
+- **首页**：Hero Card (Top1) + 标准卡片 (Top2-10) + 系统结论 + Market Summary + 预览面板 + 空状态 + Loading 预热。
+- **全市场**：搜索 + 7 种状态筛选 + 7 种排序 + 表格。
+- **详情页**：评分 breakdown + 资金行为 + 量价 + 假启动检查 + 状态时间轴 + 普通/专业模式切换。
+- **视觉**：科技感深色主题（#0a0e14）、冷青主色（#2dd4bf）、大留白、柔和圆角、150-300ms 动效、响应式、`/` 快捷键搜索。
+- `main.py` 用 `StaticFiles` 替换内联 HTML。
+
+### 配置
+
+- 新增 `configs/hysteresis.yaml`：候选防抖（min_dwell_s/min_consecutive_drops/max_deep_symbols）。
+- 新增 `configs/scoring.yaml`：评分权重 + 置信度因子 + 预热参数。
+- `DetectorsConfig` 新增 Stage1 增量阈值（light_volume_delta_z/light_trade_count_delta_z/light_price_delta_z/light_min_anomaly_signals）。
+- 新增 `HysteresisConfig` + `ScoringConfig` schema。
+
+### API
+
+- 新增 `GET /api/top10`：Top10 排名。
+- 新增 `GET /api/market-summary`：系统结论 + Top10 + 统计。
+- `GET /api/radar` 增强：opportunity_score / confidence / state_label / direction_label / summary / stale_flag。
+- `GET /api/symbol/{symbol}` 增强：完整评分 breakdown / 置信度 breakdown / 翻译模块 / 时间轴 / 子评分标签。
+- `GET /api/stats` 增强：data_status（P0.5）。
+
+### 测试
+
+- 全量 `pytest -q`：363 passed（原 306 + 新增 57）。
+- 新增 scoring 测试：评分范围 / 预热 / 强启动 / 风险分 / breakdown / 配置权重 / 极端值无溢出。
+- 新增 confidence 测试：范围 / stale / 缺失 OI / 低证据 / 预热 / 独立性。
+- 新增 presentation 测试：状态/方向/数据翻译 / 资金行为/量价翻译 / 假启动检查 / 结论生成 / 排名排序/排除规则。
+
+### 文档
+
+- 更新 README：V1.1 状态、评分体系、UI 页面、项目结构、配置。
+- 新增 `scripts/v11_smoke_test.py`：评分引擎端到端验证。
+- 新增 `scripts/verify_static.py`：静态文件验证。
+
+### 不变
+
+- 不自动交易、无 API Key、无账户/仓位/杠杆/订单。
+- 未加 RSI/MACD/SMC/OB/FVG/ML/Q-learning（§37 暂禁）。
+- 未做自动交易/多交易所。
+
+---
+
 ## [V1.0] — 2026-08-25 — Runtime 集成审计与实盘改造
 
 依据《资金行为雷达_仓库集成审计与V1实盘改造》文档。从"骨架完整但 runtime 仅接 aggTrade"改造为"全数据源 live + 两阶段 Radar + 真实 Health + Evidence 不擦除"。

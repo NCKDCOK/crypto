@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crypto Market Radar — 资金行为雷达</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- ── Header ── -->
+  <header class="header">
+    <div class="header-row">
+      <div class="header-left">
+        <div>
+          <div class="logo">CRYPTO MARKET RADAR</div>
+          <div class="logo-sub">资金行为 · 量价分析 · 启动识别</div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div id="header-stats" style="display:flex;gap:8px;align-items:center;font-size:0.75rem;color:var(--text-muted)">
+          <span id="header-universe">Universe -</span>
+          <span id="header-time"></span>
+        </div>
+        <div class="search-box">
+          <span class="icon">🔍</span>
+          <input type="text" id="search-input" placeholder="搜索 BTC / ETH / ONG..." autocomplete="off">
+          <span class="search-shortcut">/</span>
+          <div class="search-dropdown" id="search-dropdown"></div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- ── 导航 ── -->
+  <nav class="nav">
+    <div class="nav-item" data-page="home" data-route="/">首页</div>
+    <div class="nav-item" data-page="market" data-route="/market">全市场</div>
+    <div class="nav-item" data-page="signals" data-route="/signals">信号中心</div>
+    <div class="nav-item" data-page="health" data-route="/health">数据健康</div>
+    <div class="nav-item" data-page="replay" data-route="/replay">回放验证</div>
+  </nav>
+
+  <!-- ── 主内容 ── -->
+  <main class="main">
+    <div id="view"></div>
+  </main>
+
+</div>
+
+<script src="/static/js/api.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

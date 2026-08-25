@@ -69,23 +69,37 @@ def parse_kline_payload(payload: dict, receive_time: int) -> KlineEvent | None:
 class KlineCollector(BaseWSCollector):
     """Kline WS collector。
 
-    使用组合流订阅多个 symbol 的 kline。
-    例: streams = ["btcusdt@kline_1m", "ethusdt@kline_1m"]
+    使用组合流订阅多个 symbol 的 kline，支持多周期。
+    例: streams = ["btcusdt@kline_1m", "btcusdt@kline_5m", "ethusdt@kline_1m"]
     """
 
     def __init__(
         self,
         symbols: list[str],
-        interval: KlineInterval = KlineInterval.M1,
+        intervals: KlineInterval | list[KlineInterval] = KlineInterval.M1,
         config: WSStreamConfig | None = None,
         clock: Clock | None = None,
         on_kline: Any = None,
     ) -> None:
-        streams = [f"{s.lower()}@kline_{interval.value}" for s in symbols]
+        # 统一为 list
+        if isinstance(intervals, KlineInterval):
+            intervals = [intervals]
+        self.intervals = intervals
+        streams = []
+        for interval in intervals:
+            streams.extend(f"{s.lower()}@kline_{interval.value}" for s in symbols)
         cfg = config or WSStreamConfig(route="/market", streams=streams)
         cfg.streams = streams
         super().__init__(cfg, clock)
         self._on_kline = on_kline
+
+    @staticmethod
+    def build_streams(symbols: list[str], intervals: list[KlineInterval]) -> list[str]:
+        """构建 kline 流名列表（增量订阅用）。"""
+        result = []
+        for interval in intervals:
+            result.extend(f"{s.lower()}@kline_{interval.value}" for s in symbols)
+        return result
 
     def parse_payload(self, stream: str, payload: dict) -> KlineEvent | None:
         receive_time = self.clock.now_ms()

@@ -1,6 +1,11 @@
 """FastAPI 应用 — Dashboard API。
 
-依据：epic-09 Task 09-A
+[DEPRECATED] V1.1 统一到 runtime data model。
+此模块的 DashboardService 已不再被 main.py（实际运行入口）使用。
+main.py 直接调用 MarketRadarRuntime.get_radar() / get_symbol_detail() 等。
+保留此文件供向后兼容参考，新代码请勿使用。
+
+依据：epic-09 Task 09-A, V1.1 P0.6
 - Market Radar：symbol/price/state/direction/health/evidence 摘要
 - Symbol Detail：时间线/特征/Evidence/Veto/State transition
 - Data Health：每流 freshness/reconnect/message rate
@@ -13,6 +18,7 @@ AI 解读只读 AnalysisEvent，不覆盖状态。
 from __future__ import annotations
 
 import logging
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,6 +26,14 @@ from src.domain import AnalysisEvent, State
 from src.storage import InMemoryRepository
 
 logger = logging.getLogger(__name__)
+
+# P0.6: 弃用警告
+warnings.warn(
+    "src.api.dashboard.DashboardService is deprecated in V1.1. "
+    "Use MarketRadarRuntime directly via src.main.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 @dataclass

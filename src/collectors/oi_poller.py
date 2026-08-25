@@ -131,3 +131,13 @@ class OIPoller:
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+    def add_symbol(self, symbol: str) -> None:
+        """增量添加 symbol（P0.4）。"""
+        if symbol not in self.symbols:
+            self.symbols.append(symbol)
+
+    def remove_symbol(self, symbol: str) -> None:
+        """增量移除 symbol（P0.4）。"""
+        if symbol in self.symbols:
+            self.symbols.remove(symbol)

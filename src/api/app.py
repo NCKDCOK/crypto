@@ -1,8 +1,10 @@
 """FastAPI 应用定义。
 
-依据：epic-09 Task 09-A
-提供 REST endpoints 供前端调用。
-所有响应基于 AnalysisEvent，不复制业务逻辑。
+[DEPRECATED] V1.1 统一到 runtime data model。
+实际运行入口为 src.main，直接使用 MarketRadarRuntime。
+此模块的 create_app + DashboardService 已不再被 main.py 使用。
+
+依据：epic-09 Task 09-A, V1.1 P0.6
 """
 
 from __future__ import annotations

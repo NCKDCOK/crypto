@@ -134,10 +134,52 @@ class DetectorsConfig(BaseModel):
     continuation_min_oi_maintain: float = Field(default=0.0)
     exhaustion_min_divergence_count: int = Field(default=2, ge=1)
     withdrawal_min_evidence_count: int = Field(default=3, ge=1)
-    # light scanner (Stage1)
+    # light scanner (Stage1) — 短时增量异动
+    light_volume_delta_z: float = Field(default=2.5, gt=0, description="ΔQuoteVolume z-score 阈值")
+    light_trade_count_delta_z: float = Field(default=2.5, gt=0, description="ΔTradeCount z-score 阈值")
+    light_price_delta_z: float = Field(default=2.0, gt=0, description="ΔPrice z-score 阈值")
+    light_min_anomaly_signals: int = Field(default=1, ge=1, description="至少 N 个增量信号超阈值才成候选")
+    # legacy（兼容旧测试）
     light_relative_volume_z: float = Field(default=2.5, gt=0)
     light_trade_count_z: float = Field(default=2.5, gt=0)
     light_oi_change_threshold: float = Field(default=0.02, ge=0)
+
+
+class HysteresisConfig(BaseModel):
+    """Candidate 防抖配置 — P0.4。"""
+
+    min_dwell_s: float = Field(default=180.0, gt=0, description="最低驻留秒数（3 分钟）")
+    min_consecutive_drops: int = Field(default=3, ge=1, description="连续跌出阈值 N 次后才移除")
+    max_deep_symbols: int = Field(default=40, ge=1, le=1024, description="深度分析上限")
+
+
+class ScoringConfig(BaseModel):
+    """评分权重配置 — 全部配置化，禁止 magic number。"""
+
+    # 基础机会分权重（合计应归一化）
+    w_capital_inflow: float = Field(default=0.22, ge=0, le=1)
+    w_startup_quality: float = Field(default=0.20, ge=0, le=1)
+    w_trend: float = Field(default=0.15, ge=0, le=1)
+    w_immediate_stamina: float = Field(default=0.13, ge=0, le=1)
+    w_sustained_startup: float = Field(default=0.12, ge=0, le=1)
+    w_anomaly_intensity: float = Field(default=0.10, ge=0, le=1)
+    w_chase_safety: float = Field(default=0.08, ge=0, le=1)
+    # 风险扣分权重
+    w_top_risk: float = Field(default=0.35, ge=0, le=1)
+    w_crowding_risk: float = Field(default=0.20, ge=0, le=1)
+    w_withdrawal_risk: float = Field(default=0.30, ge=0, le=1)
+    w_chase_risk: float = Field(default=0.15, ge=0, le=1)
+    # 风险扣分缩放
+    risk_penalty_scale: float = Field(default=0.4, ge=0, le=1, description="风险分对机会分的扣减比例")
+    # 评分预热
+    warmup_min_samples: int = Field(default=10, ge=1, description="最小样本数才开始评分")
+    # 置信度因子
+    confidence_base: float = Field(default=0.95, ge=0, le=1)
+    confidence_missing_source_penalty: float = Field(default=0.15, ge=0, le=1)
+    confidence_stale_penalty: float = Field(default=0.30, ge=0, le=1)
+    confidence_degraded_penalty: float = Field(default=0.10, ge=0, le=1)
+    confidence_low_evidence_penalty: float = Field(default=0.08, ge=0, le=1)
+    confidence_min_evidence: int = Field(default=3, ge=1)
 
 
 class AppConfigBundle(BaseModel):
@@ -149,6 +191,8 @@ class AppConfigBundle(BaseModel):
     state_machine: StateMachineConfig = Field(default_factory=StateMachineConfig)
     symbols: SymbolsConfig = Field(default_factory=SymbolsConfig)
     detectors: DetectorsConfig = Field(default_factory=DetectorsConfig)
+    hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
+    scoring: ScoringConfig = Field(default_factory=ScoringConfig)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -177,6 +221,8 @@ def load_config(configs_dir: Path) -> AppConfigBundle:
         "state_machine": "state_machine.yaml",
         "symbols": "symbols.yaml",
         "detectors": "detectors.yaml",
+        "hysteresis": "hysteresis.yaml",
+        "scoring": "scoring.yaml",
     }
     raw: dict[str, Any] = {}
     for key, filename in files.items():

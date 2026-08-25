@@ -106,6 +106,11 @@ class AggTradeCollector(BaseWSCollector):
         self._dedup = TradeDedup()
         self._on_trade = on_trade
 
+    @staticmethod
+    def build_streams(symbols: list[str]) -> list[str]:
+        """构建 aggTrade 流名列表（增量订阅用）。"""
+        return [f"{s.lower()}@aggTrade" for s in symbols]
+
     def parse_payload(self, stream: str, payload: dict) -> TradeEvent | None:
         receive_time = self.clock.now_ms()
         return parse_aggtrade_payload(payload, receive_time)

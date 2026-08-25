@@ -1,0 +1,31 @@
+# 评分权重配置 — 全部配置化，禁止 magic number
+# 依据：V1.1 计划 §十三~§十六
+
+# 基础机会分权重（正向贡献）
+w_capital_inflow: 0.22      # 资金输入
+w_startup_quality: 0.20     # 启动质量
+w_trend: 0.15               # 趋势
+w_immediate_stamina: 0.13   # 即时续航
+w_sustained_startup: 0.12   # 持续启动
+w_anomaly_intensity: 0.10   # 异动强度
+w_chase_safety: 0.08        # 追涨安全
+
+# 风险扣分权重
+w_top_risk: 0.35            # 顶部风险
+w_crowding_risk: 0.20       # 拥挤风险
+w_withdrawal_risk: 0.30     # 撤离风险
+w_chase_risk: 0.15          # 追涨风险
+
+# 风险扣分缩放
+risk_penalty_scale: 0.4     # 风险分对机会分的扣减比例
+
+# 评分预热
+warmup_min_samples: 10      # 最小样本数才开始评分
+
+# 置信度因子
+confidence_base: 0.95
+confidence_missing_source_penalty: 0.15
+confidence_stale_penalty: 0.30
+confidence_degraded_penalty: 0.10
+confidence_low_evidence_penalty: 0.08
+confidence_min_evidence: 3

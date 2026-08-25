@@ -56,6 +56,10 @@ from src.health.queue_lag_monitor import QueueLagMonitor
 from src.health.rate_limiter import RateLimiter, RateLimiterConfig
 from src.alerts.manager import AlertManager
 from src.state_machine.machine import StateMachine
+from src.scoring.engine import ScoreEngine
+from src.scoring.confidence import ConfidenceEngine
+from src.presentation.translator import PresentationTranslator
+from src.presentation.ranking import rank_symbols, generate_system_conclusion
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +169,15 @@ class SymbolRuntimeState:
     # 数据计数
     trade_count: int = 0
     dup_count: int = 0
+    # 评分（V1.1）
+    opportunity_score: float = 0.0
+    score_available: bool = False
+    score_breakdown: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 0.0
+    confidence_available: bool = False
+    confidence_breakdown: dict[str, Any] = field(default_factory=dict)
+    summary: str = ""
+    stale_flag: float = 0.0
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -265,53 +278,90 @@ class SymbolUniverse:
 class LightScanner:
     """Stage1 — 低成本扫描 universe，找"突然不正常"的 symbol。
 
-    用 24h ticker + 跨扫描 rolling baseline 计算 relative_volume_z /
-    trade_count_z / price_change。输出 ANOMALY_CANDIDATE 排名。
+    P0.1+P0.2 修复：
+    - 不再使用 24h 累计值本身做异常
+    - 计算相邻采样之间的短时增量（ΔQuoteVolume / ΔTradeCount / ΔPricePct）
+    - 对增量维护 rolling baseline，计算 delta z-score
+    - 只有至少 N 个增量信号超阈值才成为 ANOMALY_CANDIDATE
+    - 禁止 score>0 这种"非零即候选"的逻辑
+    - 输出 ANOMALY_CANDIDATE，不直接 LONG/SHORT
     """
 
     def __init__(self, cfg: AppConfigBundle, universe: SymbolUniverse, clock: Clock) -> None:
         self.cfg = cfg
         self.universe = universe
         self.clock = clock
-        # symbol → rolling baseline of (quote_volume, count, price_change_pct)
-        self._baseline: dict[str, dict[str, list[float]]] = {}
         self.d = cfg.detectors
+        # symbol → 上一次采样的 (quote_volume, count, last_price)
+        self._prev: dict[str, dict[str, float]] = {}
+        # symbol → rolling baseline of deltas
+        self._delta_baseline: dict[str, dict[str, list[float]]] = {}
+        self._baseline_max = cfg.features.baseline_max_samples
 
     def scan(self) -> list[tuple[str, float]]:
-        """扫描 universe，返回 (symbol, score) 候选列表（降序）。"""
-        scored: list[tuple[str, float]] = []
+        """扫描 universe，返回 (symbol, score) 候选列表（降序）。
+
+        只有至少 min_anomaly_signals 个增量 z-score 超阈值才入选。
+        """
         from src.features.baseline import compute_baseline, robust_z_score
+
+        scored: list[tuple[str, float]] = []
+        now_ms = self.clock.now_ms()
 
         for sym in self.universe.universe:
             tk = self.universe.get_ticker(sym)
             qv = tk.get("quote_volume", 0.0)
             cnt = tk.get("count", 0.0)
-            pct = tk.get("price_change_pct", 0.0)
+            price = tk.get("last_price", 0.0)
 
-            bl = self._baseline.setdefault(sym, {"qv": [], "cnt": [], "pct": []})
-            qv_bl = compute_baseline(bl["qv"])
-            cnt_bl = compute_baseline(bl["cnt"])
-            qv_z = robust_z_score(qv, qv_bl)
-            cnt_z = robust_z_score(cnt, cnt_bl)
+            prev = self._prev.get(sym)
+            bl = self._delta_baseline.setdefault(sym, {"dqv": [], "dcnt": [], "dprice": []})
 
-            # 更新基线
-            bl["qv"].append(qv)
-            bl["cnt"].append(cnt)
-            bl["pct"].append(pct)
-            mx = self.cfg.features.baseline_max_samples
-            if len(bl["qv"]) > mx:
-                bl["qv"] = bl["qv"][-mx:]
-                bl["cnt"] = bl["cnt"][-mx:]
-                bl["pct"] = bl["pct"][-mx:]
+            if prev is not None:
+                # 计算短时增量
+                dqv = qv - prev.get("quote_volume", 0.0)
+                dcnt = cnt - prev.get("count", 0.0)
+                prev_price = prev.get("last_price", 0.0)
+                dprice_pct = ((price - prev_price) / prev_price * 100.0) if prev_price > 0 else 0.0
 
-            score = 0.0
-            if qv_z is not None and abs(qv_z) > self.d.light_relative_volume_z:
-                score += abs(qv_z)
-            if cnt_z is not None and abs(cnt_z) > self.d.light_trade_count_z:
-                score += abs(cnt_z) * 0.5
-            score += abs(pct) / 10.0  # 24h 涨跌幅贡献
-            if score > 0:
-                scored.append((sym, score))
+                # 计算 delta z-score
+                dqv_bl = compute_baseline(bl["dqv"])
+                dcnt_bl = compute_baseline(bl["dcnt"])
+                dprice_bl = compute_baseline(bl["dprice"])
+
+                dqv_z = robust_z_score(dqv, dqv_bl)
+                dcnt_z = robust_z_score(dcnt, dcnt_bl)
+                dprice_z = robust_z_score(dprice_pct, dprice_bl)
+
+                # 统计超阈值信号数
+                signals = 0
+                score = 0.0
+
+                if dqv_z is not None and abs(dqv_z) > self.d.light_volume_delta_z:
+                    signals += 1
+                    score += abs(dqv_z)
+                if dcnt_z is not None and abs(dcnt_z) > self.d.light_trade_count_delta_z:
+                    signals += 1
+                    score += abs(dcnt_z) * 0.5
+                if dprice_z is not None and abs(dprice_z) > self.d.light_price_delta_z:
+                    signals += 1
+                    score += abs(dprice_z) * 0.3
+
+                # 只有足够多信号才成候选（禁止 score>0 即入选）
+                if signals >= self.d.light_min_anomaly_signals:
+                    scored.append((sym, score))
+
+                # 更新基线
+                bl["dqv"].append(dqv)
+                bl["dcnt"].append(dcnt)
+                bl["dprice"].append(dprice_pct)
+                if len(bl["dqv"]) > self._baseline_max:
+                    bl["dqv"] = bl["dqv"][-self._baseline_max:]
+                    bl["dcnt"] = bl["dcnt"][-self._baseline_max:]
+                    bl["dprice"] = bl["dprice"][-self._baseline_max:]
+
+            # 保存当前采样作为下次的 prev
+            self._prev[sym] = {"quote_volume": qv, "count": cnt, "last_price": price}
 
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored
@@ -325,8 +375,9 @@ class LightScanner:
 class DeepScanner:
     """Stage2 — 候选 symbol 的深度资金行为分析。
 
-    管理 aggTrade WS + Kline WS + OI poller + Funding poller。
-    候选集变化时重建 collector。
+    管理 aggTrade WS + Kline WS（多周期）+ OI poller + Funding poller。
+    P0.3：订阅 1m/5m/15m/1h 全部周期。
+    P0.4：集合变化时增量 subscribe/unsubscribe，不整组重连。
     """
 
     def __init__(
@@ -344,17 +395,101 @@ class DeepScanner:
         self._trade_q: asyncio.Queue | None = None
         self._consumer_task: asyncio.Task | None = None
         self._running = False
+        # 多周期 Kline intervals
+        self._kline_intervals = [
+            KlineInterval(i) for i in cfg.features.kline_context_intervals
+        ]
 
     async def set_symbols(self, symbols: list[str]) -> None:
-        """更新深度分析 symbol 集（集合变化时才重建 collector）。"""
+        """更新深度分析 symbol 集。
+
+        P0.4：集合变化时增量 subscribe/unsubscribe，不整组重连。
+        首次启动（无 collector）时全量启动。
+        """
         new_set = set(symbols)
-        if new_set == set(self.symbols) and self._aggtrade is not None:
+        old_set = set(self.symbols)
+
+        if new_set == old_set:
             return
-        await self._stop_collectors()
+
+        if not new_set:
+            # 清空 — 停止所有 collectors
+            await self._stop_collectors()
+            self.symbols = []
+            return
+
+        if not self._running:
+            # 首次启动 — 全量
+            self.symbols = list(symbols)
+            if self.symbols:
+                await self._start_collectors()
+            return
+
+        # 增量变更
+        added = new_set - old_set
+        removed = old_set - new_set
+
+        if added:
+            await self._add_symbols(list(added))
+        if removed:
+            await self._remove_symbols(list(removed))
+
         self.symbols = list(symbols)
-        if not self.symbols:
-            return
-        await self._start_collectors()
+
+    async def _add_symbols(self, syms: list[str]) -> None:
+        """增量添加 symbol — WS subscribe + REST add + watchdog register。"""
+        for sym in syms:
+            self.runtime.watchdog.register_stream(
+                f"{STREAM_AGGTRADE}:{sym}", sym, StreamType.AGGTRADE)
+            self.runtime.watchdog.register_stream(
+                f"{STREAM_KLINE}:{sym}", sym, StreamType.KLINE)
+            self.runtime.watchdog.register_stream(
+                f"{STREAM_OI}:{sym}", sym, StreamType.OI_POLLER)
+            self.runtime.watchdog.register_stream(
+                f"{STREAM_FUNDING}:{sym}", sym, StreamType.FUNDING_PREMIUM)
+
+        # WS 增量订阅
+        if self._aggtrade:
+            await self._aggtrade.subscribe(AggTradeCollector.build_streams(syms))
+        if self._kline:
+            await self._kline.subscribe(
+                KlineCollector.build_streams(syms, self._kline_intervals))
+
+        # REST 增量添加
+        if self._oi:
+            for sym in syms:
+                self._oi.add_symbol(sym)
+        if self._funding:
+            for sym in syms:
+                self._funding.add_symbol(sym)
+
+        logger.info("deep_scanner_added symbols=%s total=%d", syms, len(self.symbols) + len(syms))
+
+    async def _remove_symbols(self, syms: list[str]) -> None:
+        """增量移除 symbol — WS unsubscribe + REST remove + watchdog unregister。"""
+        # WS 增量退订
+        if self._aggtrade:
+            await self._aggtrade.unsubscribe(AggTradeCollector.build_streams(syms))
+        if self._kline:
+            await self._kline.unsubscribe(
+                KlineCollector.build_streams(syms, self._kline_intervals))
+
+        # REST 增量移除
+        if self._oi:
+            for sym in syms:
+                self._oi.remove_symbol(sym)
+        if self._funding:
+            for sym in syms:
+                self._funding.remove_symbol(sym)
+
+        # watchdog 注销
+        for sym in syms:
+            self.runtime.watchdog.unregister_stream(f"{STREAM_AGGTRADE}:{sym}")
+            self.runtime.watchdog.unregister_stream(f"{STREAM_KLINE}:{sym}")
+            self.runtime.watchdog.unregister_stream(f"{STREAM_OI}:{sym}")
+            self.runtime.watchdog.unregister_stream(f"{STREAM_FUNDING}:{sym}")
+
+        logger.info("deep_scanner_removed symbols=%s total=%d", syms, len(self.symbols) - len(syms))
 
     async def _start_collectors(self) -> None:
         proxy = self.cfg.app.proxy
@@ -383,7 +518,7 @@ class DeepScanner:
         )
         self._kline = KlineCollector(
             symbols=self.symbols,
-            interval=KlineInterval.M1,
+            intervals=self._kline_intervals,
             config=WSStreamConfig(base_url=ws_base, route=self.cfg.app.ws_route_market, proxy=proxy),
             clock=self.runtime.clock,
             on_kline=self._on_kline,
@@ -410,7 +545,8 @@ class DeepScanner:
         await self._funding.start()
         self._running = True
         self._consumer_task = asyncio.create_task(self._consume_trades())
-        logger.info("deep_scanner_started symbols=%d", len(self.symbols))
+        logger.info("deep_scanner_started symbols=%d kline_intervals=%s",
+                    len(self.symbols), [i.value for i in self._kline_intervals])
 
     async def _stop_collectors(self) -> None:
         self._running = False
@@ -533,6 +669,8 @@ class MarketRadarRuntime:
         self.universe = SymbolUniverse(cfg, self.rate_limiter, self.clock)
         self.light_scanner = LightScanner(cfg, self.universe, self.clock)
         self.deep_scanner = DeepScanner(cfg, self)
+        self.score_engine = ScoreEngine(cfg.scoring)
+        self.confidence_engine = ConfidenceEngine(cfg.scoring)
 
         # 状态存储
         self.latest_state: dict[str, SymbolRuntimeState] = {}
@@ -540,6 +678,9 @@ class MarketRadarRuntime:
         self.last_evidence_transition: dict[str, AnalysisEvent] = {}
         self.transition_history: list[AnalysisEvent] = []
         self.candidates: list[tuple[str, float]] = []
+        # P0.4 Candidate Hysteresis 追踪
+        self._deep_entered_at: dict[str, int] = {}  # symbol → 进入 deep set 的时间
+        self._deep_drop_count: dict[str, int] = {}  # symbol → 连续跌出次数
 
         self._tasks: list[asyncio.Task] = []
         self._running = False
@@ -556,8 +697,13 @@ class MarketRadarRuntime:
         # 初始 universe
         await self.universe.refresh()
         # 初始 deep set = top deep_max_symbols by light score（首次用 volume 排序兜底）
-        initial = self.universe.universe[: self.cfg.app.deep_max_symbols]
+        max_deep = self.cfg.hysteresis.max_deep_symbols
+        initial = self.universe.universe[:max_deep]
         await self.deep_scanner.set_symbols(initial)
+        now_ms = self.clock.now_ms()
+        for sym in initial:
+            self._deep_entered_at[sym] = now_ms
+            self._deep_drop_count[sym] = 0
         # 周期任务
         self._tasks = [
             asyncio.create_task(self._universe_loop()),
@@ -591,20 +737,64 @@ class MarketRadarRuntime:
                 logger.exception("universe_loop_error")
 
     async def _candidate_loop(self) -> None:
-        """Stage1 扫描 → 更新候选 → 调整 deep set。"""
+        """Stage1 扫描 → 更新候选 → 防抖过滤 → 调整 deep set。
+
+        P0.4 Candidate Hysteresis：
+        - 进入 Deep Set 后最低驻留 min_dwell_s
+        - 连续 min_consecutive_drops 次跌出阈值后才移除
+        - 新 symbol 增量 subscribe，移除 symbol 增量 unsubscribe
+        """
+        hyst = self.cfg.hysteresis
         while self._running:
             try:
                 await asyncio.sleep(self.cfg.app.light_scan_interval_s)
                 self.candidates = self.light_scanner.scan()
-                # deep set = 候选 top + 保底（确保活跃币始终在）
-                top_candidates = [s for s, _ in self.candidates[: self.cfg.app.deep_max_symbols]]
-                # 补足至 deep_max_symbols（用 universe 前 N 兜底，保证 WS 不空）
+                now_ms = self.clock.now_ms()
+
+                # 期望 deep set = 候选 top + 保底
+                max_deep = hyst.max_deep_symbols
+                desired = [s for s, _ in self.candidates[:max_deep]]
+                # 补足至 max_deep（用 universe 前 N 兜底，保证 WS 不空）
                 for sym in self.universe.universe:
-                    if len(top_candidates) >= self.cfg.app.deep_max_symbols:
+                    if len(desired) >= max_deep:
                         break
-                    if sym not in top_candidates:
-                        top_candidates.append(sym)
-                await self.deep_scanner.set_symbols(top_candidates)
+                    if sym not in desired:
+                        desired.append(sym)
+                desired_set = set(desired)
+                current_set = set(self.deep_scanner.symbols)
+
+                # 防抖过滤
+                to_keep = set()
+                for sym in current_set:
+                    if sym in desired_set:
+                        # 仍在期望集中 — 重置跌出计数
+                        self._deep_drop_count[sym] = 0
+                        to_keep.add(sym)
+                    else:
+                        # 跌出期望集 — 检查驻留时间和连续跌出次数
+                        entered_at = self._deep_entered_at.get(sym, now_ms)
+                        dwell_s = (now_ms - entered_at) / 1000.0
+                        drops = self._deep_drop_count.get(sym, 0) + 1
+                        self._deep_drop_count[sym] = drops
+
+                        if dwell_s < hyst.min_dwell_s or drops < hyst.min_consecutive_drops:
+                            # 驻留不足或跌出次数不足 — 保留
+                            to_keep.add(sym)
+                        else:
+                            # 满足移除条件 — 清理追踪
+                            self._deep_entered_at.pop(sym, None)
+                            self._deep_drop_count.pop(sym, None)
+
+                # 新增 symbol
+                to_add = desired_set - to_keep
+                final_set = to_keep | to_add
+
+                # 更新进入时间
+                for sym in to_add:
+                    self._deep_entered_at[sym] = now_ms
+                    self._deep_drop_count[sym] = 0
+
+                await self.deep_scanner.set_symbols(list(final_set))
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -679,6 +869,41 @@ class MarketRadarRuntime:
             st.veto_count = len(le.vetoes)
             st.last_transition_at = le.asof
 
+        # 4.5 评分 + 置信度 + 翻译（V1.1）
+        sample_count = len(self.feature_engine.get_state(symbol).baseline_volumes)
+        score_bd = self.score_engine.compute(
+            snap=snap,
+            state=st.state,
+            direction=st.direction.value if st.direction else None,
+            evidence_count=st.evidence_count,
+            state_since_ms=st.state_since_ms,
+            now_ms=now,
+            sample_count=sample_count,
+        )
+        st.opportunity_score = score_bd.opportunity_score
+        st.score_available = score_bd.available
+        st.score_breakdown = score_bd.to_dict()
+
+        conf_bd = self.confidence_engine.compute(
+            confidence_state=confidence,
+            snap=snap,
+            evidence_count=st.evidence_count,
+            sample_count=sample_count,
+        )
+        st.confidence = conf_bd.confidence
+        st.confidence_available = conf_bd.available
+        st.confidence_breakdown = conf_bd.to_dict()
+
+        # stale_flag
+        stale_fv = snap.features.get("stale_flag")
+        st.stale_flag = stale_fv.value if stale_fv and stale_fv.available else 0.0
+
+        # 一句话结论
+        st.summary = PresentationTranslator.generate_summary(
+            st.state, st.direction.value if st.direction else None,
+            score_bd, conf_bd,
+        )
+
         # 5. 真实 transition → 存 last_transition + history
         if event is not None:
             self.last_transition[symbol] = event
@@ -716,12 +941,23 @@ class MarketRadarRuntime:
             result.append({
                 "symbol": s.symbol,
                 "state": s.state.value,
+                "state_label": PresentationTranslator.state_label(s.state),
+                "state_display": PresentationTranslator.state_display(s.state),
                 "direction": s.direction.value if s.direction else None,
+                "direction_label": PresentationTranslator.direction_label(s.direction),
                 "confidence_state": s.confidence_state.value,
+                "confidence_state_label": PresentationTranslator.confidence_label(s.confidence_state),
+                "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+                "score_available": s.score_available,
+                "confidence": round(s.confidence, 4) if s.confidence_available else None,
+                "confidence_pct": round(s.confidence * 100, 1) if s.confidence_available else None,
+                "confidence_available": s.confidence_available,
+                "summary": s.summary,
                 "price_change_24h": s.price_change_24h,
                 "quote_volume_24h": s.quote_volume_24h,
                 "evidence_count": s.evidence_count,
                 "veto_count": s.veto_count,
+                "stale_flag": s.stale_flag,
                 "last_update_ms": s.last_update_ms,
                 "state_since_ms": s.state_since_ms,
                 "last_transition_at": s.last_transition_at,
@@ -733,17 +969,60 @@ class MarketRadarRuntime:
         if s is None:
             return None
         le = self.last_evidence_transition.get(symbol)
+        evidence_list = [_ev_dict(e) for e in (le.evidence if le else [])]
+        veto_list = [_veto_dict(v) for v in (le.vetoes if le else [])]
+
+        # 特征值 dict（供翻译层用）
+        fv = s.features
+
+        # 翻译模块
+        capital_flow = PresentationTranslator.translate_capital_flow(fv)
+        volume_price = PresentationTranslator.translate_volume_price(fv)
+        false_start = PresentationTranslator.translate_false_start_check(veto_list)
+
+        # 状态时间轴
+        timeline = [
+            {
+                "asof": e.asof,
+                "previous_state": e.previous_state.value,
+                "new_state": e.new_state.value,
+            }
+            for e in self.transition_history
+            if e.symbol == symbol
+        ][-20:]
+        timeline_translated = PresentationTranslator.translate_timeline(timeline)
+
         return {
             "symbol": symbol,
             "state": s.state.value,
+            "state_label": PresentationTranslator.state_label(s.state),
+            "state_display": PresentationTranslator.state_display(s.state),
             "direction": s.direction.value if s.direction else None,
+            "direction_label": PresentationTranslator.direction_label(s.direction),
             "confidence_state": s.confidence_state.value,
+            "confidence_state_label": PresentationTranslator.confidence_label(s.confidence_state),
             "state_since_ms": s.state_since_ms,
             "features": s.features,
             "health": s.health,
-            "evidence": [_ev_dict(e) for e in (le.evidence if le else [])],
-            "vetoes": [_veto_dict(v) for v in (le.vetoes if le else [])],
+            "evidence": evidence_list,
+            "vetoes": veto_list,
             "last_transition_at": s.last_transition_at,
+            # V1.1 评分
+            "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+            "score_available": s.score_available,
+            "score_breakdown": s.score_breakdown,
+            "confidence": round(s.confidence, 4) if s.confidence_available else None,
+            "confidence_pct": round(s.confidence * 100, 1) if s.confidence_available else None,
+            "confidence_available": s.confidence_available,
+            "confidence_breakdown": s.confidence_breakdown,
+            "summary": s.summary,
+            "stale_flag": s.stale_flag,
+            # 翻译模块
+            "capital_flow": capital_flow,
+            "volume_price": volume_price,
+            "false_start_check": false_start,
+            "timeline": timeline_translated,
+            "subscore_labels": PresentationTranslator.subscore_labels(),
         }
 
     def get_health(self) -> list[dict[str, Any]]:
@@ -781,11 +1060,35 @@ class MarketRadarRuntime:
         counts: dict[str, int] = {}
         for s in self.latest_state.values():
             counts[s.state.value] = counts.get(s.state.value, 0) + 1
+        # P0.5: 人类可读数据状态
+        any_stale = any(s.stale_flag > 0 for s in self.latest_state.values())
+        any_fail = any(
+            v in ("FAIL", "STALE") for s in self.latest_state.values() for v in s.health.values()
+        )
+        # 整体 confidence 状态
+        all_confident = all(
+            s.confidence_state == ConfidenceState.CONFIDENT
+            for s in self.latest_state.values()
+        ) if self.latest_state else False
+        any_unknown = any(
+            s.confidence_state == ConfidenceState.UNKNOWN
+            for s in self.latest_state.values()
+        )
+        if any_fail or any_unknown:
+            data_status = "数据异常"
+        elif any_stale:
+            data_status = "数据延迟"
+        elif all_confident:
+            data_status = "数据正常"
+        else:
+            data_status = "数据降级"
+
         return {
             "universe_size": len(self.universe.universe),
             "deep_size": len(self.deep_scanner.symbols),
             "candidate_count": len(self.candidates),
             "state_counts": counts,
+            "data_status": data_status,
             "queue_depth": self.queue_monitor.get_queue_metrics("trade").depth if self.queue_monitor.get_queue_metrics("trade") else 0,
             "rate_limiter": {
                 "weight_used": self.rate_limiter.state.weight_used,
@@ -793,6 +1096,25 @@ class MarketRadarRuntime:
                 "total_418": self.rate_limiter.state.total_418,
                 "circuit_open": self.rate_limiter.state.circuit_open,
             },
+        }
+
+    def get_top10(self) -> list[dict[str, Any]]:
+        """Top10 排名 — 按 RankingScore 排序。"""
+        radar = self.get_radar()
+        return rank_symbols(radar, top_n=10)
+
+    def get_market_summary(self) -> dict[str, Any]:
+        """市场总览 — 系统结论 + 统计。"""
+        top10 = self.get_top10()
+        stats = self.get_stats()
+        conclusion = generate_system_conclusion(top10, stats.get("candidate_count", 0))
+        return {
+            "conclusion": conclusion,
+            "data_status": stats.get("data_status", "未知"),
+            "universe_size": stats.get("universe_size", 0),
+            "candidate_count": stats.get("candidate_count", 0),
+            "state_counts": stats.get("state_counts", {}),
+            "top10": top10,
         }
 
 

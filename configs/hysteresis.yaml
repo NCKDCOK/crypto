@@ -1,0 +1,5 @@
+# Candidate 防抖配置 — P0.4
+# 进入 Deep Set 后最低驻留时间 + 连续跌出次数才移除
+min_dwell_s: 180          # 最低驻留 3 分钟
+min_consecutive_drops: 3  # 连续 3 次跌出阈值后才移除
+max_deep_symbols: 40      # 深度分析 symbol 上限

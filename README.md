@@ -1,4 +1,4 @@
-# 资金行为驱动行情分析系统
+# 资金行为雷达 — Crypto Market Radar
 
 > 全市场扫描 Binance USDT-M 永续合约"钱是否正在异常进入/退出"，先过滤假启动，再提醒用户关注真正有持续性的资金行为。
 >
@@ -8,12 +8,19 @@
 
 ## 这是什么
 
-一个资金行为驱动的实时行情分析与启动雷达系统。核心研究对象不是 RSI/MACD，而是 **Price × Volume × Trade Flow × Open Interest** 的联动：识别资金异动、启动、延续、衰竭与撤离，输出可解释证据、排行榜和提醒。
+一个资金行为驱动的实时行情分析与启动雷达系统。核心研究对象不是 RSI/MACD，而是 **Price × Volume × Trade Flow × Open Interest** 的联动：识别资金异动、启动、延续、衰竭与撤离，输出可解释评分、Top10 排行和用户化提醒。
+
+系统核心流程：
+
+```
+资金异动 → 疑似启动 → 假启动过滤 → 确认启动 → 趋势延续 → 衰竭 → 撤离
+```
 
 | | |
 |---|---|
 | **核心原则** | 先证明"数据可信"和"资金行为可解释"，再谈评分与 AI 解读 |
-| **Evidence-first** | V1 只输出证据链 + 状态，不搞拍脑袋的 0–100 机会分 |
+| **Evidence-first** | 任何分数必须可展开 → 原始 Evidence → 原始数据 |
+| **可解释评分** | 11 个子评分 + 机会分 + 独立置信度，权重全部配置化 |
 | **Fail Closed** | 数据不新鲜/不完整时输出 UNKNOWN / DATA_STALE，不继续造信号 |
 | **不做什么** | 自动下单、API Key、账户、仓位、杠杆、订单管理 |
 
@@ -21,40 +28,152 @@
 
 ## 项目状态
 
-🟢 **V1 Runtime 已落地（实盘数据接入）** — 全部数据采集器已接入 runtime 并收到真实 Binance 数据，Data Health 真实工作，Evidence 不被擦除，多时间窗口生效，两阶段 Radar 运行。
+🟢 **V1.1 已落地 — Runtime 修复 + 评分体系 + Top10 大屏 + UI 产品化**
+
+### V1.1 新增
+
+| 模块 | 说明 |
+|---|---|
+| **Runtime 修复 (P0)** | Stage1 增量异动、多周期 Kline、候选防抖、数据状态翻译、Dashboard 统一 |
+| **评分引擎** | 11 个子评分（7 基础 + 4 风险），OpportunityScore = 加权基础分 - 风险扣分 |
+| **置信度引擎** | 独立于机会分，受数据健康/证据完整性/多窗口一致性影响 |
+| **翻译层** | PresentationTranslator：内部术语 → 用户中文（状态/方向/资金行为/量价/假启动） |
+| **Top10 排名** | RankingScore = OpportunityScore × ConfidenceFactor，排除 UNKNOWN/stale |
+| **UI 大屏** | 6 页面 SPA：首页 Top10 / 全市场搜索 / 详情 / 信号中心 / 数据健康 / 回放 |
 
 ### 已 Live 的数据
 
 | 数据源 | 状态 | 说明 |
 |---|---|---|
 | aggTrade (WS) | ✅ LIVE | 实时成交、aggressor side、CVD、taker delta、trade_id 去重 |
-| Kline 1m (WS) | ✅ LIVE | close-bar 确认、多周期 context |
-| Open Interest (REST) | ✅ LIVE | 基础资产数量、Δ30s/1m/5m、velocity、accel、带容差 as-of |
+| Kline 1m/5m/15m/1h (WS) | ✅ LIVE | 多周期订阅（V1.1 修复：之前仅 1m） |
+| Open Interest (REST) | ✅ LIVE | 基础资产数量、Δ30s/1m/5m、velocity、accel |
 | Funding/Premium (REST) | ✅ LIVE | 拥挤度上下文、soft veto |
-| 24h ticker (REST) | ✅ LIVE | 动态 universe 发现 + Stage1 扫描 |
+| 24h ticker (REST) | ✅ LIVE | 动态 universe 发现 + Stage1 短时增量扫描 |
 
 ### 当前 Universe
 
-动态：Binance USDT-M 永续 ACTIVE/TRADING，按 24h quote volume 排序 top-N（默认 100，可配 `configs/symbols.yaml`），支持 blacklist/whitelist/liquidity floor/max_symbols。
-Stage2 深度分析候选 ≤ `deep_max_symbols`（默认 40）。
+动态：Binance USDT-M 永续 ACTIVE/TRADING，按 24h quote volume 排序 top-N（默认 100），支持 blacklist/whitelist/liquidity floor/max_symbols。
+Stage2 深度分析候选 ≤ `max_deep_symbols`（默认 40，配 `configs/hysteresis.yaml`）。
 
-### 如何启动
+---
+
+## 如何启动
 
 ```bash
+# 安装依赖（首次）
+python -m venv .venv
+.venv\Scripts\activate          # Windows
+# source .venv/bin/activate      # Linux/Mac
+pip install -e .
+
+# 启动
 uvicorn src.main:app --host 127.0.0.1 --port 8050
-# 受限网络环境在 configs/app.yaml 设置 proxy
+
+# 浏览器访问
+# http://127.0.0.1:8050/
 ```
 
-### 如何测试
+> 受限网络环境在 `configs/app.yaml` 设置 `proxy: "http://127.0.0.1:7890"`
+
+---
+
+## 如何测试
 
 ```bash
-pytest -q                                          # 全量离线测试
+pytest -q                                          # 全量离线测试（363 passed）
 python scripts/live_smoke_test.py --duration 600   # 10 分钟 live 冒烟（BTC/ETH/SOL）
+python scripts/v11_smoke_test.py                   # V1.1 评分引擎端到端验证
 ```
 
-### 当前限制
+---
 
-详见 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)：冷启动 baseline 不稳定、InMemory 存储（重启不保留）、无 Depth/OFI/Liquidation、无机会分（评分延后 Gate 8）。
+## UI 页面
+
+| 页面 | 路由 | 功能 |
+|---|---|---|
+| **首页 / 资金雷达大屏** | `#/` | Top10 排名（Hero Card + 标准卡片）+ 系统结论 + Market Summary |
+| **全市场** | `#/market` | 搜索 + 状态筛选 + 多维排序 + 全量表格 |
+| **币种详情** | `#/symbol/:symbol` | 评分 breakdown + 资金行为 + 量价 + 假启动检查 + 时间轴 + 普通/专业模式 |
+| **信号中心** | `#/signals` | 历史状态变化（中文翻译） |
+| **数据健康** | `#/health` | 开发者表（每流 freshness + 置信度） |
+| **回放验证** | `#/replay` | 评分校准（需积累数据后启用） |
+
+UI 风格：**科技感 + Apple 式克制丝滑** — 深色背景、冷青主色、大留白、柔和圆角、150-300ms 动效、响应式、`/` 快捷键搜索。
+
+---
+
+## 评分体系
+
+### 子评分（11 个，全部配置化权重 `configs/scoring.yaml`）
+
+| 子评分 | 类型 | 回答 |
+|---|---|---|
+| 资金输入 | 基础 | 新增方向资金是否真的进入？ |
+| 启动质量 | 基础 | 这次异动是不是像真正启动？ |
+| 趋势 | 基础 | 当前方向是否稳定？ |
+| 即时续航 | 基础 | 最近几十秒到几分钟，资金还在不在？ |
+| 持续启动 | 基础 | 启动是不是只有一波，还是有持续性？ |
+| 异动强度 | 基础 | 当前变化相对历史是否异常？ |
+| 追涨安全 | 基础 | 现在是不是已经太晚？ |
+| 顶部风险 | 风险 | 是否出现衰竭迹象？ |
+| 拥挤风险 | 风险 | Funding/Premium 是否过热？ |
+| 撤离风险 | 风险 | OI 衰减 / Delta 反转 / CVD 反转？ |
+| 追涨风险 | 风险 | 延伸幅度 / 回撤风险？ |
+
+### 公式
+
+```
+OpportunityScore = 加权基础分 - 风险扣分（risk_penalty_scale 缩放）
+ConfidenceFactor = base - stale_penalty - degraded_penalty - missing_source_penalty - low_evidence_penalty
+RankingScore    = OpportunityScore × ConfidenceFactor
+```
+
+- 机会分回答：这个机会本身好不好？
+- 置信度回答：我们对这个判断有多大把握？
+- 排名分回答：首页 Top10 该排谁？
+
+---
+
+## 项目结构
+
+```
+src/
+├── collectors/          # 数据采集器（aggTrade/Kline/OI/Funding WS+REST）
+├── features/            # 特征引擎（多窗口/基线/z-score/CVD/效率）
+├── detectors/           # 检测器（anomaly/startup/false_start/continuation/withdrawal）
+├── health/              # 数据健康（freshness/confidence/rate_limiter/queue_lag）
+├── state_machine/       # 状态机（SLEEPING→ANOMALY→SUSPECTED→CONFIRMED→...）
+├── scoring/             # 评分引擎（11子评分 + 机会分 + 置信度引擎）  ← V1.1 新增
+├── presentation/        # 翻译层 + Top10 排名                      ← V1.1 新增
+├── api/                 # FastAPI（已 DEPRECATED，统一到 main.py）
+├── runtime.py           # 运行时编排（两阶段 Radar + 防抖 + 评分集成）
+└── main.py              # FastAPI 入口 + 静态文件托管
+
+static/                  # 前端 SPA                                ← V1.1 新增
+├── index.html
+├── css/style.css
+└── js/ (api.js, app.js)
+
+configs/                 # 全部配置（app/symbols/features/detectors/
+                        #          state_machine/data_health/hysteresis/scoring）
+tests/                   # 363 测试（含 scoring + presentation）
+```
+
+---
+
+## 配置
+
+| 文件 | 说明 |
+|---|---|
+| `configs/app.yaml` | 交易所、代理、编排节奏 |
+| `configs/symbols.yaml` | Universe 过滤（quote_asset/blacklist/whitelist/liquidity/top_n） |
+| `configs/features.yaml` | 窗口、Kline 周期、基线样本 |
+| `configs/detectors.yaml` | 检测器 + Stage1 增量阈值 |
+| `configs/hysteresis.yaml` | 候选防抖（驻留时间/连续跌出/上限） ← V1.1 新增 |
+| `configs/scoring.yaml` | 评分权重 + 置信度因子 ← V1.1 新增 |
+| `configs/state_machine.yaml` | 状态机参数 |
+| `configs/data_health.yaml` | freshness budget + rate limiter |
 
 ---
 
@@ -64,99 +183,46 @@ python scripts/live_smoke_test.py --duration 600   # 10 分钟 live 冒烟（BTC
 
 | 文档 | 内容 |
 |------|------|
-| [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) | 系统设计规范（架构、契约、检测器、状态机） |
-| [AI_CODING_AGENT_MANUAL.md](AI_CODING_AGENT_MANUAL.md) | AI Coding Agent 开发执行手册（Gate 流程、任务格式） |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 分层架构、事件拓扑、时钟、存储与配置接口 |
-| [AI_RULES.md](AI_RULES.md) | 12 条硬规则 + 方向安全 P0 规则（每个 Agent 必读） |
+| [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md) | 系统设计规范 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 分层架构、事件拓扑 |
+| [AI_CODING_AGENT_MANUAL.md](AI_CODING_AGENT_MANUAL.md) | AI 开发执行手册 |
+| [AI_RULES.md](AI_RULES.md) | 硬规则 + 方向安全 |
 
 ### 数据与模型契约
 
 | 文档 | 内容 |
 |------|------|
-| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | 全部事件对象字段、枚举、aggressor_side 映射、OI 单位 |
-| [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md) | 完整状态转移、guard、COOLDOWN 配置、squeeze 例外 |
-| [docs/DATA_HEALTH.md](docs/DATA_HEALTH.md) | freshness budget、HealthLevel、ConfidenceState 派生、限频 |
-| [docs/ANALYSIS_MODEL.md](docs/ANALYSIS_MODEL.md) | 特征清单、证据族、Veto 清单、检测器职责 |
-| [docs/TESTING.md](docs/TESTING.md) | 测试策略、fixture 规范、replay 确定性 |
+| [docs/DATA_MODEL.md](docs/DATA_MODEL.md) | 事件对象字段、枚举 |
+| [docs/STATE_MACHINE.md](docs/STATE_MACHINE.md) | 状态转移、guard |
+| [docs/DATA_HEALTH.md](docs/DATA_HEALTH.md) | freshness、ConfidenceState |
+| [docs/ANALYSIS_MODEL.md](docs/ANALYSIS_MODEL.md) | 特征、证据、Veto |
+| [docs/FEATURE_CATALOG.md](docs/FEATURE_CATALOG.md) | Feature 目录 |
 
-### Runtime 实施文档（V1）
+### Runtime 文档
 
 | 文档 | 内容 |
 |------|------|
-| [docs/RUNTIME_INTEGRATION_AUDIT.md](docs/RUNTIME_INTEGRATION_AUDIT.md) | 集成审计：orphan 模块 / demo override / 缺失集成 |
-| [docs/RUNTIME_ARCHITECTURE.md](docs/RUNTIME_ARCHITECTURE.md) | 运行时编排层架构与不变量 |
-| [docs/LIVE_DATA_FLOW.md](docs/LIVE_DATA_FLOW.md) | 端到端实盘数据流（ASCII） |
-| [docs/FEATURE_CATALOG.md](docs/FEATURE_CATALOG.md) | 全部 Feature 目录与追溯 |
-| [docs/DETECTOR_LOGIC.md](docs/DETECTOR_LOGIC.md) | 检测器证据链 / Veto / subtype |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 启动 / 配置 / smoke test / 运维 |
-| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | 已知限制与风险 |
+| [docs/RUNTIME_ARCHITECTURE.md](docs/RUNTIME_ARCHITECTURE.md) | 运行时编排 |
+| [docs/LIVE_DATA_FLOW.md](docs/LIVE_DATA_FLOW.md) | 端到端数据流 |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 启动/配置/运维 |
+| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | 已知限制 |
 
-### Epic Specs（按 Gate 推进）
+### V1.1 计划
 
-| Spec | Gate | 目标 |
-|------|------|------|
-| [specs/epic-00-foundation.md](specs/epic-00-foundation.md) | 0 | 项目骨架 / contracts / 测试框架 |
-| [specs/epic-01-market-data.md](specs/epic-01-market-data.md) | 1 | Market Data Gateway |
-| [specs/epic-02-data-health.md](specs/epic-02-data-health.md) | 2 | Data Health & 时间对齐 |
-| [specs/epic-03-feature-engine.md](specs/epic-03-feature-engine.md) | 3 | Feature Engine |
-| [specs/epic-04-anomaly.md](specs/epic-04-anomaly.md) | 4 | Anomaly Detector |
-| [specs/epic-05-startup.md](specs/epic-05-startup.md) | 5 | Startup 候选/确认 |
-| [specs/epic-06-false-start.md](specs/epic-06-false-start.md) | 6 | False Start Filter（最重要） |
-| [specs/epic-07-continuation-withdrawal.md](specs/epic-07-continuation-withdrawal.md) | 7 | Continuation & Withdrawal |
-| [specs/epic-08-replay-labeling.md](specs/epic-08-replay-labeling.md) | 8 | Replay & 标注 |
-| [specs/epic-09-dashboard-alerts.md](specs/epic-09-dashboard-alerts.md) | 9 | Dashboard & Alerts |
-
-### 决策记录
-
-| ADR | 标题 |
-|-----|------|
-| [docs/adr/0001-record-architecture-decisions.md](docs/adr/0001-record-architecture-decisions.md) | 记录架构决策 |
-| [docs/adr/0000-template.md](docs/adr/0000-template.md) | ADR 模板 |
+| 文档 | 内容 |
+|------|------|
+| [资金行为雷达_V1.1_Runtime修复_评分体系_Top10大屏_UI产品化.md](资金行为雷达_V1.1_Runtime修复_评分体系_Top10大屏_UI产品化.md) | V1.1 完整计划（19 步骤） |
 
 ---
 
-## 推荐技术栈
+## 技术栈
 
 | 层 | 选型 |
 |----|------|
 | 后端 | Python 3.12 + asyncio + FastAPI + Pydantic |
-| 缓存/队列 | 进程内 asyncio.Queue（V1）；Redis Streams（规模上升后） |
-| 数据库 | PostgreSQL → TimescaleDB |
-| 前端 | React + TypeScript + Vite |
+| 前端 | 原生 HTML/CSS/JS（SPA，FastAPI 静态托管，无构建系统） |
 | 测试 | pytest + pytest-asyncio + hypothesis |
-| 部署 | Docker Compose |
-
----
-
-## 开发方式
-
-采用 **Gate-based AI Development**：进度不以"第几周"为主，而以"通过验收 Gate 后才进入下一阶段"为主。
-
-- **人负责**：需求、证据定义、边界与验收。
-- **AI 负责**：在锁定接口和测试条件下实现代码。
-- **绝不让 AI 同时充当研究员、架构师、程序员并自由发明交易逻辑。**
-
-推荐会话分工：Agent A = Implementer / Agent B = Reviewer / Agent C = Test Designer。
-
-详见 [AI_CODING_AGENT_MANUAL.md](AI_CODING_AGENT_MANUAL.md)。
-
----
-
-## 开工顺序
-
-| # | Task | 完成标志 |
-|---|------|----------|
-| 01 | domain contracts + configs + test harness | 仓库骨架与稳定事件模型 |
-| 02 | aggTrade collector + reconnect + dedup | 实时成交流，不做分析 |
-| 03 | Data Health freshness watchdog | 能识别"WS 连着但没数据" |
-| 04 | OI poller + time-aligned history | OI contracts 变化可信 |
-| 05 | Taker Delta + windowed CVD | 真正的主动买卖资金流 |
-| 06 | Volume/TradeCount/PriceAccel robust anomaly | 全市场异动候选 |
-| 07 | Startup evidence model | SUSPECTED_START |
-| 08 | False-start veto pack | REJECTED vs START_CONFIRMED |
-| 09 | Continuation / Withdrawal | 资金持续与撤离状态 |
-| 10 | Replay + labels | 开始验证系统有没有 edge |
-| 11 | Dashboard / Telegram | 最后再做漂亮展示 |
+| 部署 | uvicorn（单进程）；Docker Compose（规模上升后） |
 
 ---
 

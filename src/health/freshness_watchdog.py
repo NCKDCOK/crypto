@@ -83,6 +83,10 @@ class FreshnessWatchdog:
         self._streams[stream] = state
         return state
 
+    def unregister_stream(self, stream: str) -> None:
+        """注销一个 stream（P0.4 增量移除 symbol 时调用）。"""
+        self._streams.pop(stream, None)
+
     def get_stream(self, stream: str) -> StreamState | None:
         return self._streams.get(stream)
 

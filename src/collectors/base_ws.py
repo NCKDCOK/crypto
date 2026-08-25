@@ -66,6 +66,9 @@ class BaseWSCollector(ABC):
 
     子类实现 parse_payload() 将原始 payload 转为标准化事件，
     实现 on_event() 处理事件。
+
+    支持增量 subscribe/unsubscribe（P0.4）：连接建立后通过 WS 消息动态增删流，
+    无需整组重连。
     """
 
     def __init__(
@@ -79,6 +82,7 @@ class BaseWSCollector(ABC):
         self._running = False
         self._ws: Any = None
         self._reconnect_delay = float(config.reconnect_delay_ms) / 1000
+        self._next_msg_id: int = 1
 
     @abstractmethod
     def parse_payload(self, stream: str, payload: dict) -> Any:
@@ -103,6 +107,39 @@ class BaseWSCollector(ABC):
         if isinstance(msg, dict) and "stream" in msg and "data" in msg:
             return msg["stream"], msg["data"]
         return None, msg if isinstance(msg, dict) else None
+
+    async def _send_json(self, data: dict) -> None:
+        """向当前 WS 连接发送 JSON 消息（增量订阅/退订用）。"""
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps(data))
+            except Exception as e:
+                logger.warning("ws_send_failed error=%s", e)
+
+    async def subscribe(self, streams: list[str]) -> None:
+        """增量订阅新流 — 更新 config.streams 并发送 SUBSCRIBE 消息。
+
+        重连时会用更新后的 config.streams 重建 URL，保证订阅不丢。
+        """
+        new_streams = [s for s in streams if s not in self.config.streams]
+        if not new_streams:
+            return
+        self.config.streams.extend(new_streams)
+        msg = {"method": "SUBSCRIBE", "params": new_streams, "id": self._next_msg_id}
+        self._next_msg_id += 1
+        await self._send_json(msg)
+        logger.info("ws_subscribed streams=%s total=%d", new_streams, len(self.config.streams))
+
+    async def unsubscribe(self, streams: list[str]) -> None:
+        """增量退订流 — 更新 config.streams 并发送 UNSUBSCRIBE 消息。"""
+        removed = [s for s in streams if s in self.config.streams]
+        if not removed:
+            return
+        self.config.streams = [s for s in self.config.streams if s not in removed]
+        msg = {"method": "UNSUBSCRIBE", "params": removed, "id": self._next_msg_id}
+        self._next_msg_id += 1
+        await self._send_json(msg)
+        logger.info("ws_unsubscribed streams=%s total=%d", removed, len(self.config.streams))
 
     async def _connect_and_listen(self) -> None:
         """单次连接的生命周期：连接 → 接收 → 断开。"""
