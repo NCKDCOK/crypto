@@ -724,29 +724,6 @@ td.clickable { cursor: pointer; }
 }
 .timeline-item .label { font-size: 0.8rem; }
 
-/* 模式切换 */
-.mode-toggle {
-  display: inline-flex;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 2px;
-}
-.mode-btn {
-  padding: 4px 12px;
-  font-size: 0.72rem;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  border-radius: var(--radius-sm);
-  transition: var(--transition-fast);
-}
-.mode-btn.active {
-  background: var(--bg-surface);
-  color: var(--accent);
-}
-
 /* ── 空状态 ── */
 .empty-state {
   text-align: center;

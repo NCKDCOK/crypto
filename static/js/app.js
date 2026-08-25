@@ -14,7 +14,6 @@ const State = {
   filter: 'all',
   sortKey: 'ranking',
   sortDir: 'desc',
-  detailMode: 'normal', // normal | pro
   radarData: [],
   statsData: {},
   healthData: [],
@@ -695,11 +694,6 @@ async function renderDetail(view) {
   }
 
   view.innerHTML = renderDetailContent(detail, false);
-  // 绑定模式切换
-  window.toggleDetailMode = function() {
-    State.detailMode = State.detailMode === 'normal' ? 'pro' : 'normal';
-    renderPage();
-  };
   // 绑定展开
   document.querySelectorAll('.expand-btn').forEach(btn => {
     btn.onclick = function() {
@@ -714,7 +708,6 @@ function renderDetailContent(d, isPreview) {
   const dir = d.direction || '';
   const opp = d.opportunity_score;
   const conf = d.confidence_pct;
-  const mode = State.detailMode;
 
   let html = '';
 
@@ -744,16 +737,6 @@ function renderDetailContent(d, isPreview) {
     <div>${escapeHtml(d.summary || '')}</div>
   </div>`;
 
-  // 模式切换（仅完整详情）
-  if (!isPreview) {
-    html += `<div style="margin-bottom:16px;display:flex;justify-content:space-between;align-items:center">
-      <div class="mode-toggle">
-        <button class="mode-btn ${mode === 'normal' ? 'active' : ''}" onclick="toggleDetailMode()">普通模式</button>
-        <button class="mode-btn ${mode === 'pro' ? 'active' : ''}" onclick="toggleDetailMode()">专业模式</button>
-      </div>
-    </div>`;
-  }
-
   // ── 评分模块 ──
   if (d.score_breakdown && d.score_breakdown.subscores) {
     const labels = d.subscore_labels || {};
@@ -770,8 +753,8 @@ function renderDetailContent(d, isPreview) {
         <div class="track"><div class="fill ${color}" style="width:${ss.score}%"></div></div>
         <span class="num">${fmt(ss.score, 1)}</span>
       </div>`;
-      // 专业模式展开组件
-      if (mode === 'pro' && ss.components) {
+      // 组件明细（合并视图，始终显示）
+      if (ss.components) {
         html += `<div class="pro-data show" style="padding-left:80px">`;
         for (const c of ss.components) {
           html += `<div class="pro-row"><span>${c.name}</span><span class="v">${c.value != null ? fmt(c.value, 4) : '-'} → ${fmt(c.contribution, 1)}</span></div>`;
@@ -848,8 +831,8 @@ function renderDetailContent(d, isPreview) {
     html += `</div>`;
   }
 
-  // ── 证据链（专业模式）──
-  if (mode === 'pro' && d.evidence && d.evidence.length > 0) {
+  // ── 证据链 ──
+  if (d.evidence && d.evidence.length > 0) {
     html += `<div class="module">
       <div class="module-title">证据链 (${d.evidence.length})</div>`;
     for (const e of d.evidence) {
