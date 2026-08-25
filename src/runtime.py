@@ -60,6 +60,7 @@ from src.health.queue_lag_monitor import QueueLagMonitor
 from src.health.rate_limiter import RateLimiter, RateLimiterConfig
 from src.alerts.manager import AlertManager
 from src.state_machine.machine import StateMachine
+from src.supervision.supervisor import SupervisorEngine
 from src.scoring.engine import ScoreEngine
 from src.scoring.data_confidence import DataConfidenceEngine, DataConfidenceBreakdown
 from src.scoring.signal_confirmation import (
@@ -224,6 +225,8 @@ class SymbolRuntimeState:
     trend_label: str = ""
     pump_risk: float | None = None
     trade_plan: dict[str, Any] = field(default_factory=dict)
+    # V1.3 §7 监督池元数据（SupervisorEngine 派生，dict 形式供 API/UI）
+    supervision: dict[str, Any] = field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -828,6 +831,8 @@ class MarketRadarRuntime:
         self.pump_risk_engine = PumpRiskEngine()
         self.breakout_lifecycle_engine = BreakoutLifecycleEngine()
         self.trade_plan_engine = TradePlanEngine()
+        # V1.3 §5-§10 状态监督：池派生映射 + state-aware 监督引擎
+        self.supervisor = SupervisorEngine(cfg.supervision)
 
         # 状态存储
         self.latest_state: dict[str, SymbolRuntimeState] = {}
@@ -1321,6 +1326,19 @@ class MarketRadarRuntime:
                 symbol, event.previous_state.value, event.new_state.value,
                 event.direction.value if event.direction else "-", len(event.evidence), len(event.vetoes),
             )
+
+        # V1.3 §5-§10 状态监督：更新监督池元数据（派生标签来自 setup_type）
+        labels: list[str] = []
+        if st.setup_type == "DISTRIBUTION":
+            labels.append("distribution")
+        elif st.setup_type == "PUMP_RISK":
+            labels.append("pump_risk")
+        elif st.setup_type in ("ACCUMULATION", "BREAKOUT_START", "RETEST_REIGNITION"):
+            labels.append(st.setup_type.lower())
+        st.supervision = self.supervisor.update(
+            symbol, st.state, setup_type=st.setup_type,
+            labels=labels, now_ms=now,
+        ).to_dict()
 
     # ── 数据访问（Dashboard 用）──
 
