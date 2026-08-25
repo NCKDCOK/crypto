@@ -87,6 +87,15 @@ from src.engines.trend import TrendEngine
 from src.engines.pump_risk import PumpRiskEngine
 from src.engines.breakout_lifecycle import BreakoutLifecycleEngine
 from src.engines.trade_plan import STATUS_ACTIVE, TradePlan, TradePlanEngine
+from src.simulation import (
+    DecisionSnapshotService,
+    EntryRevalidationEngine,
+    PaperPositionManager,
+    RecommendationSnapshotService,
+    SimulationQueueManager,
+    SimulationStatistics,
+)
+from src.simulation.snapshot import FORMAL_STATES
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +236,12 @@ class SymbolRuntimeState:
     trade_plan: dict[str, Any] = field(default_factory=dict)
     # V1.3 §7 监督池元数据（SupervisorEngine 派生，dict 形式供 API/UI）
     supervision: dict[str, Any] = field(default_factory=dict)
+    # V1.3 P2 模拟验证：引擎状态 dict（RecommendationSnapshot §20 / Revalidation ctx §26）
+    breakout_state: dict[str, Any] = field(default_factory=dict)
+    structure_state: dict[str, Any] = field(default_factory=dict)
+    spot_perp_state: dict[str, Any] = field(default_factory=dict)
+    # V1.3 §11 稳定决策快照（DecisionSnapshotService 冻结；{frozen_at, decision}）
+    decision_snapshot: dict[str, Any] = field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -834,6 +849,35 @@ class MarketRadarRuntime:
         # V1.3 §5-§10 状态监督：池派生映射 + state-aware 监督引擎
         self.supervisor = SupervisorEngine(cfg.supervision)
 
+        # V1.3 P2 模拟验证（§11/§22/§26/§29/§62）：阈值全部从 cfg 注入
+        self.decision_snapshot_service = DecisionSnapshotService(
+            interval_s=cfg.ranking.decision_snapshot_s,
+        )
+        self.recommendation_snapshot_service = RecommendationSnapshotService(
+            min_opportunity=cfg.ranking.min_opportunity,
+            min_signal_confirmation=cfg.ranking.min_signal_confirmation,
+            min_data_confidence=cfg.ranking.min_data_confidence,
+            max_pump_risk=cfg.ranking.max_pump_risk,
+        )
+        self.revalidation_engine = EntryRevalidationEngine(
+            stale_max_s=cfg.simulation.revalidation_stale_max_s,
+            min_data_confidence=cfg.ranking.min_data_confidence,
+            max_pump_risk=cfg.ranking.max_pump_risk,
+        )
+        self.simulation_positions = PaperPositionManager(
+            cfg.simulation, repository=self.repository,
+        )
+        self.simulation_queue = SimulationQueueManager(
+            cfg.simulation, self.repository,
+            revalidation=self.revalidation_engine,
+            positions=self.simulation_positions,
+        )
+        self.simulation_stats = SimulationStatistics()
+        # §19/§22 快照去重：symbol → 已冻结快照的 trade_plan_id 集合
+        self._snapshot_plan_ids: dict[str, set[str]] = {}
+        # V1.3 §48 重启保留：恢复 队列 / 持仓（内存态），并预置快照去重集合
+        self._restore_simulation_state()
+
         # 状态存储
         self.latest_state: dict[str, SymbolRuntimeState] = {}
         self.last_transition: dict[str, AnalysisEvent] = {}
@@ -1198,6 +1242,7 @@ class MarketRadarRuntime:
         klines_15m = self.feature_engine.get_kline_history(symbol, "15m")
         struct = self.structure_engine.compute(klines_15m, current_price=current_price)
         vp = self.volume_profile_engine.compute(klines_15m)
+        st.structure_state = struct.to_dict()
 
         # 吸筹 / 派发 / 复活 / 冲量 / Pump
         accum = self.accumulation_engine.compute(fv_dict, st.direction.value if st.direction else None)
@@ -1215,6 +1260,7 @@ class MarketRadarRuntime:
         # Spot×Perp
         spot_perp = self.spot_perp_engine.compute(fv_dict, st.direction.value if st.direction else None)
         st.spot_perp_label = spot_perp.label
+        st.spot_perp_state = spot_perp.to_dict()
 
         # Setup Type
         setup = self.setup_type_engine.compute(
@@ -1239,6 +1285,7 @@ class MarketRadarRuntime:
             context_1h=fv_dict.get("context_1h"),
             fv=fv_dict,
         )
+        st.breakout_state = breakout.to_dict()
 
         # 位置
         location = self.location_engine.compute(current_price or None, fv_dict,
@@ -1339,6 +1386,158 @@ class MarketRadarRuntime:
             symbol, st.state, setup_type=st.setup_type,
             labels=labels, now_ms=now,
         ).to_dict()
+
+        # V1.3 P2：首页稳定决策快照（§11）+ 推荐快照/模拟验证驱动（§22/§29；§47 仅 LIVE）
+        self._build_home_decision(symbol, now)
+        if self.system_mode == SystemMode.LIVE:
+            self._maybe_create_snapshot(symbol, now, current_price)
+            self._drive_simulation(symbol, now)
+
+    # ── V1.3 P2 模拟验证：决策快照 / 推荐快照 / 逐 tick 驱动 ──
+
+    def _build_home_decision(self, symbol: str, now: int) -> None:
+        """V1.3 §11：冻结稳定决策快照（首页展示层；引擎实时值不受影响）。"""
+        st = self.get_state(symbol)
+        decision = {
+            "symbol": symbol,
+            "state": st.state.value,
+            "setup_type": st.setup_type,
+            "direction": st.direction.value if st.direction else None,
+            "opportunity_score": st.opportunity_score if st.score_available else None,
+            "signal_confirmation": st.signal_confirmation if st.signal_confirmation_available else None,
+            "data_confidence": st.data_confidence if st.data_confidence_available else None,
+            "pump_risk": st.pump_risk,
+            "accumulation_score": st.accumulation_score,
+            "distribution_risk": st.distribution_risk,
+            "stale_flag": st.stale_flag,
+            "summary": st.summary,
+            "trade_plan": st.trade_plan,
+        }
+        st.decision_snapshot = self.decision_snapshot_service.update(symbol, now, decision)
+
+    def _maybe_create_snapshot(self, symbol: str, now: int, current_price: float) -> None:
+        """§22：过 Top 门槛的正式推荐 → 冻结不可变快照 → WATCHING 入队。
+
+        §47 门控在调用方（仅 LIVE）。去重（§19/§22）：同一 trade_plan_id 只冻结
+        一份；版本冻结产生新 trade_plan_id 后再建新快照。
+        """
+        st = self.get_state(symbol)
+        plan = st.trade_plan or {}
+        plan_id = plan.get("trade_plan_id")
+        if not plan_id or plan.get("status") != STATUS_ACTIVE:
+            return
+        done = self._snapshot_plan_ids.setdefault(symbol, set())
+        if plan_id in done:
+            return
+        passed = self.recommendation_snapshot_service.passes_gate(
+            state=st.state,
+            opportunity_score=st.opportunity_score if st.score_available else None,
+            signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
+            data_confidence=st.data_confidence if st.data_confidence_available else None,
+            trade_plan=plan,
+            pump_risk=st.pump_risk,
+            stale_flag=st.stale_flag,
+        )
+        if not passed:
+            return
+        # §20 证据 / Veto：最近含证据的 transition（冻结推荐时刻的上下文）
+        le = self.last_evidence_transition.get(symbol)
+        evidence = [
+            {"family": e.family.value, "type": e.type, "window": e.window,
+             "value": e.value, "threshold": e.threshold, "passed": e.passed, "source": e.source}
+            for e in (le.evidence if le and le.evidence else [])
+        ]
+        vetoes = [
+            {"type": v.type.value, "triggered": v.triggered,
+             "severity": v.severity.value, "detail": v.detail}
+            for v in (le.vetoes if le and le.vetoes else [])
+        ]
+        snap = self.recommendation_snapshot_service.build(
+            symbol=symbol,
+            timestamp=now,
+            market_regime=self.market_regime.to_dict() if self.market_regime else {},
+            state=st.state,
+            setup_type=st.setup_type,
+            direction=st.direction.value if st.direction else None,
+            current_price=current_price or None,
+            opportunity_score=st.opportunity_score if st.score_available else None,
+            signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
+            data_confidence=st.data_confidence if st.data_confidence_available else None,
+            all_subscores={
+                **st.score_breakdown,
+                **st.data_confidence_breakdown,
+                **st.signal_confirmation_breakdown,
+            },
+            all_evidence=evidence,
+            all_vetoes=vetoes,
+            breakout_state=st.breakout_state,
+            structure_state=st.structure_state,
+            spot_perp_state=st.spot_perp_state,
+            trade_plan=plan,
+        )
+        done.add(plan_id)
+        self.repository.save_recommendation_snapshot(symbol, now, snap.to_dict())
+        self.simulation_queue.create_from_snapshot(snap.to_dict(), now)
+        logger.info("[simulation] %s 冻结推荐快照 %s", symbol, snap.snapshot_id)
+
+    def _drive_simulation(self, symbol: str, now: int) -> None:
+        """V1.3 P2：模拟队列 + 持仓逐 tick 驱动（§47 仅 LIVE 正式）。
+
+        队列不驱动持仓：先 tick 持仓（OPEN 期静态 TP/Stop 优先，§32B），
+        再 tick 队列（OPEN → CLOSED 与持仓平仓同 tick 同步，§31）。
+        """
+        st = self.get_state(symbol)
+        ctx = self._build_simulation_ctx(symbol, st, now)
+        self.simulation_positions.tick_symbol(symbol, ctx, now)
+        self.simulation_queue.tick_symbol(symbol, ctx, now)
+
+    def _build_simulation_ctx(self, symbol: str, st: SymbolRuntimeState, now: int) -> dict[str, Any]:
+        """§26 入场二次验证 / §29-§32 持仓退出所需的运行时上下文。
+
+        invalidated：离开正式范围且非 WITHDRAWAL（WITHDRAWAL 由独立确认计时处理）
+        即视为原 Setup 失效（§50）。
+        """
+        ticker = self.universe.get_ticker(symbol)
+        price = ticker.get("last_price") or None
+        if not price:
+            price = st.features.get("price") or None
+        data_age_ms = None
+        if st.last_update_ms is not None:
+            data_age_ms = max(0, now - st.last_update_ms)
+        invalidated = st.state.value not in FORMAL_STATES and st.state != State.WITHDRAWAL
+        return {
+            "price": price,
+            "state": st.state.value,
+            "setup_type": st.setup_type,
+            "direction": st.direction.value if st.direction else None,
+            "confidence_state": st.confidence_state.value if st.confidence_state else None,
+            "data_confidence": st.data_confidence if st.data_confidence_available else None,
+            "data_age_ms": data_age_ms,
+            "features": st.features,
+            "breakout": st.breakout_state,
+            "structure": st.structure_state,
+            "spot_perp": st.spot_perp_state,
+            "regime": self.market_regime.to_dict() if self.market_regime else None,
+            "pump_risk": st.pump_risk,
+            "distribution_risk": st.distribution_risk,
+            "withdrawal_active": st.state == State.WITHDRAWAL,
+            "invalidated": invalidated,
+        }
+
+    def _restore_simulation_state(self) -> None:
+        """V1.3 §48 重启保留：恢复 队列 / 持仓（内存态），并预置快照去重集合。"""
+        try:
+            for item_dict in self.repository.list_simulation_queue():
+                self.simulation_queue.restore_item(item_dict)
+            for pos_dict in self.repository.list_simulation_positions():
+                self.simulation_positions.restore_position(pos_dict)
+            for item in self.simulation_queue.all():
+                plan = (item.snapshot or {}).get("trade_plan") or {}
+                pid = plan.get("trade_plan_id")
+                if pid:
+                    self._snapshot_plan_ids.setdefault(item.symbol, set()).add(pid)
+        except Exception:
+            logger.exception("[simulation] §48 恢复模拟状态失败，跳过（不影响启动）")
 
     # ── 数据访问（Dashboard 用）──
 

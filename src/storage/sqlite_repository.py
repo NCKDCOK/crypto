@@ -105,6 +105,52 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- ── V1.3 模拟验证（§59 持久化表）──
+
+CREATE TABLE IF NOT EXISTS recommendation_snapshots (
+    snapshot_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    snapshot_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rs_symbol_time ON recommendation_snapshots(symbol, created_at);
+
+CREATE TABLE IF NOT EXISTS simulation_queue (
+    simulation_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    item_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sq_status ON simulation_queue(status, updated_at);
+
+CREATE TABLE IF NOT EXISTS simulation_positions (
+    simulation_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    position_json TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS simulation_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    simulation_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    asof INTEGER NOT NULL,
+    old_status TEXT NOT NULL,
+    new_status TEXT NOT NULL,
+    reason TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_se_sim_time ON simulation_events(simulation_id, asof);
+
+CREATE TABLE IF NOT EXISTS simulation_results (
+    simulation_id TEXT PRIMARY KEY,
+    snapshot_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    result_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sr_symbol ON simulation_results(symbol);
 """
 
 
@@ -310,6 +356,187 @@ class SqliteRepository(Repository):
         if row is None:
             return None
         return json.loads(row["plan_json"])
+
+    # ── V1.3 模拟验证持久化（§59）──
+
+    def save_recommendation_snapshot(self, symbol: str, asof: int, snap: dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO recommendation_snapshots (snapshot_id, symbol, created_at, snapshot_json)
+                    VALUES (?,?,?,?)""",
+                    (snap["snapshot_id"], symbol, asof, json.dumps(snap, ensure_ascii=False)),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_recommendation_snapshot_failed symbol=%s", symbol)
+
+    def list_recommendation_snapshots(self, symbol: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                if symbol is None:
+                    rows = self._conn.execute(
+                        "SELECT * FROM recommendation_snapshots ORDER BY created_at DESC LIMIT ?",
+                        (limit,),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM recommendation_snapshots WHERE symbol=? ORDER BY created_at DESC LIMIT ?",
+                        (symbol, limit),
+                    ).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_recommendation_snapshots_failed")
+            return []
+        return [json.loads(r["snapshot_json"]) for r in rows]
+
+    def save_simulation_queue_item(self, item: dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO simulation_queue (simulation_id, snapshot_id, symbol, status, updated_at, item_json)
+                    VALUES (?,?,?,?,?,?)""",
+                    (item["simulation_id"], item["snapshot_id"], item["symbol"], item["status"],
+                     item["updated_at"], json.dumps(item, ensure_ascii=False)),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_simulation_queue_item_failed id=%s", item.get("simulation_id"))
+
+    def list_simulation_queue(self, status: str | None = None) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                if status is None:
+                    rows = self._conn.execute(
+                        "SELECT * FROM simulation_queue ORDER BY updated_at DESC"
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM simulation_queue WHERE status=? ORDER BY updated_at DESC",
+                        (status,),
+                    ).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_simulation_queue_failed")
+            return []
+        return [json.loads(r["item_json"]) for r in rows]
+
+    def get_simulation_queue_item(self, simulation_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT * FROM simulation_queue WHERE simulation_id=?", (simulation_id,),
+                ).fetchone()
+        except Exception:
+            logger.exception("sqlite_get_simulation_queue_item_failed id=%s", simulation_id)
+            return None
+        return json.loads(row["item_json"]) if row else None
+
+    def save_simulation_position(self, pos: dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO simulation_positions (simulation_id, symbol, status, position_json)
+                    VALUES (?,?,?,?)""",
+                    (pos["simulation_id"], pos["symbol"], pos["status"], json.dumps(pos, ensure_ascii=False)),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_simulation_position_failed id=%s", pos.get("simulation_id"))
+
+    def list_simulation_positions(self, status: str | None = None) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                if status is None:
+                    rows = self._conn.execute(
+                        "SELECT * FROM simulation_positions ORDER BY simulation_id"
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        "SELECT * FROM simulation_positions WHERE status=? ORDER BY simulation_id",
+                        (status,),
+                    ).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_simulation_positions_failed")
+            return []
+        return [json.loads(r["position_json"]) for r in rows]
+
+    def get_simulation_position(self, simulation_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT * FROM simulation_positions WHERE simulation_id=?", (simulation_id,),
+                ).fetchone()
+        except Exception:
+            logger.exception("sqlite_get_simulation_position_failed id=%s", simulation_id)
+            return None
+        return json.loads(row["position_json"]) if row else None
+
+    def save_simulation_event(
+        self, simulation_id: str, symbol: str, asof: int,
+        old_status: str, new_status: str, reason: str | None,
+    ) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO simulation_events (simulation_id, symbol, asof, old_status, new_status, reason)
+                    VALUES (?,?,?,?,?,?)""",
+                    (simulation_id, symbol, asof, old_status, new_status, reason),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_simulation_event_failed id=%s", simulation_id)
+
+    def list_simulation_events(self, simulation_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT * FROM simulation_events WHERE simulation_id=? ORDER BY asof ASC LIMIT ?",
+                    (simulation_id, limit),
+                ).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_simulation_events_failed id=%s", simulation_id)
+            return []
+        return [
+            {
+                "simulation_id": r["simulation_id"], "symbol": r["symbol"], "asof": r["asof"],
+                "old_status": r["old_status"], "new_status": r["new_status"], "reason": r["reason"],
+            }
+            for r in rows
+        ]
+
+    def save_simulation_result(self, result: dict[str, Any]) -> None:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO simulation_results (simulation_id, snapshot_id, symbol, result_json)
+                    VALUES (?,?,?,?)""",
+                    (result["simulation_id"], result["snapshot_id"], result["symbol"],
+                     json.dumps(result, ensure_ascii=False)),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_simulation_result_failed id=%s", result.get("simulation_id"))
+
+    def list_simulation_results(self, limit: int = 500) -> list[dict[str, Any]]:
+        try:
+            with self._lock:
+                rows = self._conn.execute(
+                    "SELECT * FROM simulation_results ORDER BY simulation_id DESC LIMIT ?", (limit,),
+                ).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_simulation_results_failed")
+            return []
+        return [json.loads(r["result_json"]) for r in rows]
+
+    def get_simulation_result(self, simulation_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT * FROM simulation_results WHERE simulation_id=?", (simulation_id,),
+                ).fetchone()
+        except Exception:
+            logger.exception("sqlite_get_simulation_result_failed id=%s", simulation_id)
+            return None
+        return json.loads(row["result_json"]) if row else None
 
     # ── 恢复查询 ──
 

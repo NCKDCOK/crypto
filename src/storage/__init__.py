@@ -80,6 +80,53 @@ class Repository(ABC):
     def get_active_trade_plan(self, symbol: str) -> dict[str, Any] | None:
         return None
 
+    # ── V1.3 模拟验证持久化（§59, 默认 no-op，SqliteRepository 覆写）──
+
+    def save_recommendation_snapshot(self, symbol: str, asof: int, snap: dict[str, Any]) -> None:
+        """保存推荐快照（§60 recommendation_snapshots）。"""
+        pass
+
+    def save_simulation_queue_item(self, item: dict[str, Any]) -> None:
+        """保存/更新模拟队列项（§59 simulation_queue）。"""
+        pass
+
+    def save_simulation_event(self, event: dict[str, Any]) -> None:
+        """保存模拟事件（§59 simulation_events）。"""
+        pass
+
+    def save_simulation_position(self, pos: dict[str, Any]) -> None:
+        """保存/更新模拟持仓（§59 simulation_positions）。"""
+        pass
+
+    def save_simulation_result(self, res: dict[str, Any]) -> None:
+        """保存模拟结果（§61 simulation_results）。"""
+        pass
+
+    def list_recommendation_snapshots(
+        self, symbol: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        return []
+
+    def list_simulation_queue(self, status: str | None = None) -> list[dict[str, Any]]:
+        return []
+
+    def list_simulation_positions(self) -> list[dict[str, Any]]:
+        return []
+
+    def list_simulation_results(self, limit: int = 500) -> list[dict[str, Any]]:
+        return []
+
+    def get_simulation_result(self, simulation_id: str) -> dict[str, Any] | None:
+        return None
+
+    def get_simulation_position(self, simulation_id: str) -> dict[str, Any] | None:
+        return None
+
+    def list_simulation_events(
+        self, symbol: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        return []
+
     def get_last_write_ms(self) -> int | None:
         return None
 
@@ -98,6 +145,12 @@ class InMemoryRepository(Repository):
         self._feature_snapshots: list[FeatureSnapshot] = []
         self._analysis_events: list[AnalysisEvent] = []
         self._oi_snapshots: list[OpenInterestSnapshot] = []
+        # V1.3 模拟验证（§59）
+        self._recommendation_snapshots: dict[str, dict[str, Any]] = {}
+        self._simulation_queue: dict[str, dict[str, Any]] = {}
+        self._simulation_events: list[dict[str, Any]] = []
+        self._simulation_positions: dict[str, dict[str, Any]] = {}
+        self._simulation_results: dict[str, dict[str, Any]] = {}
 
     async def save_event(self, event: Any) -> None:
         self._events.append(event)
@@ -138,3 +191,57 @@ class InMemoryRepository(Repository):
             for ev in self._analysis_events
             if ev.symbol == symbol and since <= ev.asof <= until
         ]
+
+    # ── V1.3 模拟验证（内存版，测试/replay 用）──
+
+    def save_recommendation_snapshot(self, symbol: str, asof: int, snap: dict[str, Any]) -> None:
+        self._recommendation_snapshots[(snap.get("snapshot_id") or f"{symbol}-{asof}")] = dict(snap)
+
+    def save_simulation_queue_item(self, item: dict[str, Any]) -> None:
+        self._simulation_queue[item["simulation_id"]] = dict(item)
+
+    def save_simulation_event(self, event: dict[str, Any]) -> None:
+        self._simulation_events.append(dict(event))
+
+    def save_simulation_position(self, pos: dict[str, Any]) -> None:
+        self._simulation_positions[pos["simulation_id"]] = dict(pos)
+
+    def save_simulation_result(self, res: dict[str, Any]) -> None:
+        self._simulation_results[res["simulation_id"]] = dict(res)
+
+    def list_recommendation_snapshots(
+        self, symbol: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        snaps = [v for k, v in self._recommendation_snapshots.items()
+                 if symbol is None or v.get("symbol") == symbol]
+        snaps.sort(key=lambda s: s.get("timestamp", 0), reverse=True)
+        return snaps[:limit]
+
+    def list_simulation_queue(self, status: str | None = None) -> list[dict[str, Any]]:
+        items = list(self._simulation_queue.values())
+        if status is not None:
+            items = [i for i in items if i.get("status") == status]
+        items.sort(key=lambda i: i.get("updated_at", 0), reverse=True)
+        return items
+
+    def list_simulation_positions(self) -> list[dict[str, Any]]:
+        return list(self._simulation_positions.values())
+
+    def list_simulation_results(self, limit: int = 500) -> list[dict[str, Any]]:
+        results = list(self._simulation_results.values())
+        results.sort(key=lambda r: r.get("entry_time", 0), reverse=True)
+        return results[:limit]
+
+    def get_simulation_result(self, simulation_id: str) -> dict[str, Any] | None:
+        return self._simulation_results.get(simulation_id)
+
+    def get_simulation_position(self, simulation_id: str) -> dict[str, Any] | None:
+        return self._simulation_positions.get(simulation_id)
+
+    def list_simulation_events(
+        self, symbol: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        events = [e for e in self._simulation_events
+                  if symbol is None or e.get("symbol") == symbol]
+        events.sort(key=lambda e: e.get("asof", 0), reverse=True)
+        return events[:limit]
