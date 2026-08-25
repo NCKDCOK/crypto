@@ -806,7 +806,8 @@ class MarketRadarRuntime:
             rest_base_url=cfg.app.rest_base_url,
             feature_engine=self.feature_engine,
         )
-        self.system_mode: SystemMode = SystemMode.WARMUP
+        # V1.3 §47：启动默认 BOOTSTRAP，恢复流程完成后由 _run_recovery 置为 RECOVERY/WARMUP
+        self.system_mode: SystemMode = SystemMode.BOOTSTRAP
         self.recovery_report: RecoveryReport | None = None
         # V1.2 §6.4 Top10 排名滞回
         self.ranking_hysteresis = RankingHysteresis()
@@ -1616,6 +1617,7 @@ class MarketRadarRuntime:
         stats = self.get_stats()
         if not self.is_live:
             mode_label = {
+                SystemMode.BOOTSTRAP: "系统启动中（初始化组件/等待恢复完成）",
                 SystemMode.RECOVERY: "系统恢复中（补历史/重建结构）",
                 SystemMode.WARMUP: "系统预热中（OI/CVD/Delta 基线建立中）",
             }.get(self.system_mode, "系统启动中")

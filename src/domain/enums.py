@@ -133,13 +133,15 @@ class VetoSeverity(str, Enum):
 
 
 class SystemMode(str, Enum):
-    """系统运行模式（V1.2 停机恢复）。
+    """系统运行模式（V1.2 停机恢复 + V1.3 §47 BOOTSTRAP）。
 
+    - BOOTSTRAP：进程启动初始化，恢复流程尚未完成。只展示数据，不发正式推送、不进强确认 Top10。
     - RECOVERY：启动后正在补历史缺口 / 重建慢变量。可展示数据，不发正式推送、不进入强确认 Top10。
     - WARMUP：历史已补，OI/CVD/Delta 基线重新预热中（最小样本未达）。
     - LIVE：正常评分、排名、推送。
     """
 
+    BOOTSTRAP = "BOOTSTRAP"
     RECOVERY = "RECOVERY"
     WARMUP = "WARMUP"
     LIVE = "LIVE"

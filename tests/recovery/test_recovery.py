@@ -48,14 +48,25 @@ class TestSystemModeGating:
         cfg = AppConfigBundle()
         return MarketRadarRuntime(cfg, clock=TestClock(0), repository=InMemoryRepository())
 
-    def test_default_warmup_top10_empty(self):
+    def test_default_bootstrap_top10_empty(self):
         rt = self._rt()
-        assert rt.system_mode == SystemMode.WARMUP
+        # V1.3 §47：启动默认 BOOTSTRAP（恢复流程完成前）
+        assert rt.system_mode == SystemMode.BOOTSTRAP
         assert rt.is_live is False
         assert rt.get_top10() == []
         summary = rt.get_market_summary()
         assert summary["top10"] == []
-        assert "恢复" in summary["conclusion"] or "预热" in summary["conclusion"]
+        assert "启动" in summary["conclusion"]
+
+    def test_bootstrap_fail_closed_no_promotion(self):
+        """BOOTSTRAP 期间即使样本达标也不升 LIVE（恢复完成前 fail-closed）。"""
+        rt = self._rt()
+        assert rt.system_mode == SystemMode.BOOTSTRAP
+        fe_state = rt.feature_engine.get_state("BTCUSDT")
+        fe_state.baseline_volumes = list(range(rt.cfg.recovery.live_min_samples + 5))
+        rt.deep_scanner.symbols = ["BTCUSDT"]
+        rt._promote_mode(0)
+        assert rt.system_mode == SystemMode.BOOTSTRAP
 
     def test_live_top10_produced(self):
         rt = self._rt()
