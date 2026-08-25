@@ -25,4 +25,13 @@ const API = {
   async getMarketSummary() { return this._fetch('/market-summary'); },
   async getPrices() { return this._fetch('/prices'); },
   async getSymbolDetail(symbol) { return this._fetch('/symbol/' + symbol); },
+
+  // ---- V1.3 endpoints (§63) ----
+  async getHome() { return this._fetch('/home'); },
+  async getMarket() { return this._fetch('/market'); },
+  async getSupervision() { return this._fetch('/supervision'); },
+  async getSupervisionSymbol(symbol) { return this._fetch('/supervision/' + encodeURIComponent(symbol)); },
+  async getSimulations() { return this._fetch('/simulations'); },
+  async getSimulation(id) { return this._fetch('/simulations/' + encodeURIComponent(id)); },
+  async getStatistics() { return this._fetch('/statistics'); },
 };

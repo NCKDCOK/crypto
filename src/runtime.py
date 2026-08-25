@@ -1683,7 +1683,32 @@ class MarketRadarRuntime:
             "trend_score": s.trend_score,
             "trend_label": s.trend_label,
             "pump_risk": s.pump_risk,
+            # V1.3 P3：Drawer 完整分析（§17 G/I、§51、§55/§56）
+            "decision_snapshot": s.decision_snapshot or {},
+            "breakout_state": s.breakout_state,
+            "structure_state": s.structure_state,
+            "spot_perp_state": s.spot_perp_state,
+            "simulation": self._symbol_drawer_simulations(symbol),
         }
+
+    def _symbol_drawer_simulations(self, symbol: str) -> list[dict[str, Any]]:
+        """§51 Drawer 模拟状态：该 symbol 最近最多 3 条模拟（队列 + 持仓 + 结果）。"""
+        out: list[dict[str, Any]] = []
+        for item in self.simulation_queue.all():
+            if item.symbol != symbol:
+                continue
+            sim_id = item.simulation_id
+            pos = self.simulation_positions.get(sim_id)
+            pos_dict = pos.to_dict() if pos is not None else self.repository.get_simulation_position(sim_id)
+            out.append({
+                "simulation_id": sim_id,
+                "item": item.to_dict(),
+                "position": pos_dict,
+                "result": self.repository.get_simulation_result(sim_id),
+            })
+            if len(out) >= 3:
+                break
+        return out
 
     def get_health(self) -> list[dict[str, Any]]:
         """数据健康表。"""
@@ -1877,6 +1902,25 @@ class MarketRadarRuntime:
             st = self.get_state(r["symbol"])
             row = dict(r)
             row["decision_snapshot"] = st.decision_snapshot or {}
+            # §52 首页只加一个小状态：该 symbol 最靠前的活跃模拟阶段（等待/跟踪/已入）
+            row["simulation_status"] = self._symbol_simulation_status(r["symbol"])
+            # §16 首页卡片子评分（实时，供 §54 30s 趋势箭头）
+            subscores: dict[str, Any] = {}
+            for k, v in ((st.score_breakdown or {}).get("subscores") or {}).items():
+                if k in ("capital_inflow", "startup_quality", "sustained_startup",
+                         "immediate_stamina", "chase_safety", "withdrawal_risk") \
+                        and isinstance(v, dict) and v.get("available"):
+                    subscores[k] = round(v.get("score") or 0.0, 1)
+            row["live_subscores"] = subscores
+            # §16 主周期：取该 symbol 模拟队列中冻结快照的时间框架；无则 None（UI 显示 —）
+            tf: str | None = None
+            for it in self.simulation_queue.all():
+                if it.symbol == r["symbol"]:
+                    tf = (it.snapshot or {}).get("primary_timeframe")
+                    break
+            row["primary_timeframe"] = tf
+            # §53 监督阶段（derive 用：当前监督池 + 模拟阶段）
+            row["supervision"] = st.supervision or {}
             confirmed.append(row)
         return {
             "market_regime": self.market_regime.to_dict() if self.market_regime else None,
@@ -1919,6 +1963,21 @@ class MarketRadarRuntime:
             })
         return out
 
+    def _symbol_simulation_status(self, symbol: str) -> str | None:
+        """§52 首页微型模拟状态：取该 symbol 最靠前的活跃队列阶段（WATCHING→OPEN）。"""
+        stage = {
+            "WATCHING": 0, "ENTRY_ZONE_REACHED": 1, "REVALIDATING": 2,
+            "ARMED": 3, "SIMULATED_ENTRY": 4, "OPEN": 5,
+        }
+        best: tuple[int, str] | None = None
+        for item in self.simulation_queue.all():
+            if item.symbol != symbol:
+                continue
+            s = stage.get(item.status.value)
+            if s is not None and (best is None or s > best[0]):
+                best = (s, item.status.value)
+        return best[1] if best else None
+
     def _risk_candidates(self) -> list[dict[str, Any]]:
         """风险提示列表：RISK / EXIT 池标的，按风险强度（Pump + 派发）降序。"""
         out: list[dict[str, Any]] = []
@@ -1958,12 +2017,15 @@ class MarketRadarRuntime:
             "setup_label": s.setup_label,
             "supervision_level": rec.supervision_level.value,
             "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+            "signal_confirmation": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
             "current_price": self.universe.get_ticker(rec.symbol).get("last_price", 0.0),
             "entered_pool_at": rec.entered_pool_at,
             "entered_state_at": rec.entered_state_at,
             "last_transition_at": rec.last_transition_at,
             "condition_fail_streak": rec.condition_fail_streak,
             "last_action": rec.last_action.value,
+            # §41 当前监督重点（池级监督问题）
+            "supervision_question": self.supervisor.pools.spec(rec.current_pool).supervision_question,
         }
 
     def get_supervision_kanban(self) -> dict[str, Any]:

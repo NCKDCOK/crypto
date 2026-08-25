@@ -911,3 +911,286 @@ td.clickable { cursor: pointer; }
 @media (max-width: 768px) {
   .side-drawer { width: 100vw; }
 }
+
+/* ═══════════════════════════════════════════════════════════
+   V1.3 P3 — 首页重构 / 监督台 / 模拟验证 / Drawer 重构
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── §15 首页顶部字段 ── */
+.top-stats {
+  display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0;
+  padding: 12px 16px; background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.top-stat {
+  display: flex; flex-direction: column; gap: 2px; padding-right: 20px;
+  border-right: 1px solid var(--border);
+}
+.top-stat:last-child { border-right: none; }
+.top-stat .label { font-size: 0.7rem; color: var(--text-muted); }
+.top-stat .value { font-size: 1rem; font-weight: 700; color: var(--text-primary); }
+.top-stat .value.accent { color: var(--accent); }
+.top-stat .value.long { color: var(--long); }
+.top-stat .value.warning { color: var(--warning); }
+.top-stat .value.short { color: var(--short); }
+.top-stat .sub { font-size: 0.72rem; color: var(--text-muted); }
+
+/* ── 区块标题 ── */
+.section-title {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 0.85rem; font-weight: 700; color: var(--text-secondary);
+  margin: 20px 0 10px; letter-spacing: 0.02em;
+}
+.section-title .count { font-size: 0.72rem; font-weight: 600; color: var(--accent); }
+.section-title .count.short { color: var(--short); }
+
+/* ── 空态 compact ── */
+.empty-state.compact { padding: 28px 16px; }
+.empty-state.compact .title { font-size: 1rem; }
+
+/* ── §14 正在观察 ── */
+.watch-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+.watch-card {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); padding: 12px 14px; cursor: pointer;
+  transition: border-color var(--transition-fast), transform var(--transition-fast);
+}
+.watch-card:hover { border-color: var(--border-accent); transform: translateY(-1px); }
+.watch-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.watch-body { display: flex; gap: 18px; margin-bottom: 6px; }
+.watch-row { display: flex; align-items: baseline; gap: 6px; font-size: 0.8rem; }
+.watch-row .label { color: var(--text-muted); font-size: 0.72rem; }
+.watch-row .value { font-weight: 700; }
+
+/* ── 风险中 ── */
+.risk-strip { display: flex; flex-wrap: wrap; gap: 6px; }
+.risk-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 5px 10px; background: rgba(239,68,68,0.06);
+  border: 1px solid rgba(239,68,68,0.2); border-radius: 999px;
+  font-size: 0.75rem; cursor: pointer;
+}
+.risk-chip .sym { font-weight: 700; color: var(--short); }
+.risk-chip:hover { border-color: var(--short-dim); }
+
+/* ── §16 首页正式卡片 ── */
+.card-scores { display: flex; gap: 22px; margin: 10px 0 6px; }
+.card-scores .score-row { gap: 6px; min-width: 0; }
+.card-scores .score-row .value { font-size: 1.1rem; }
+.card-scores .arrow { font-size: 0.85rem; font-weight: 700; margin-left: 2px; }
+
+.card-meta { display: flex; align-items: center; gap: 4px; font-size: 0.75rem; margin: 8px 0 2px; }
+.stage-badge {
+  padding: 2px 8px; border-radius: 999px; font-size: 0.72rem; font-weight: 600;
+  background: rgba(45,212,191,0.12); color: var(--accent); border: 1px solid var(--border-accent);
+}
+.sim-mini {
+  padding: 1px 7px; border-radius: 999px; font-size: 0.68rem; font-weight: 600;
+  background: rgba(148,163,184,0.12); color: var(--text-secondary);
+  border: 1px solid var(--border); white-space: nowrap;
+}
+.sim-mini.live { background: rgba(34,197,94,0.12); color: var(--long); border-color: rgba(34,197,94,0.3); }
+
+.sub-tiles {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 6px; margin: 8px 0;
+}
+.sub-tile {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 10px; background: var(--bg-elevated);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+}
+.sub-tile .label { color: var(--text-muted); }
+.sub-tile .val { font-weight: 700; }
+.sub-tile .val.high { color: var(--long); }
+.sub-tile .val.mid { color: var(--warning); }
+.sub-tile .val.low { color: var(--text-secondary); }
+.sub-tile .val.risk-high { color: var(--short); }
+.sub-tile .val.risk-low { color: var(--long); }
+.sub-tile.risk { border-color: rgba(239,68,68,0.25); }
+.sub-tile .arrow { font-size: 0.8rem; font-weight: 700; }
+.card-plan {
+  font-size: 0.75rem; color: var(--accent-dim); margin-top: 6px;
+  padding-top: 8px; border-top: 1px dashed var(--border);
+}
+
+/* ── 监督台（§40 Kanban）── */
+.page-title { font-size: 1.1rem; font-weight: 700; margin: 4px 0 2px; }
+.supervision-head { margin-bottom: 12px; }
+.supervision-head .sub { font-size: 0.78rem; }
+.kanban {
+  display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px;
+}
+.kanban-col {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); display: flex; flex-direction: column;
+  min-height: 120px;
+}
+.kanban-head {
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 12px; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary);
+  border-bottom: 1px solid var(--border);
+}
+.kanban-head .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--neutral); }
+.kanban-col[data-pool="anomaly"] .kanban-head .dot { background: var(--warning); }
+.kanban-col[data-pool="watch"] .kanban-head .dot { background: var(--blue); }
+.kanban-col[data-pool="confirmed"] .kanban-head .dot { background: var(--long); }
+.kanban-col[data-pool="continuation"] .kanban-head .dot { background: var(--accent); }
+.kanban-col[data-pool="risk"] .kanban-head .dot { background: var(--warning); }
+.kanban-col[data-pool="exit"] .kanban-head .dot { background: var(--short); }
+.kanban-head .count { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
+.kanban-body { padding: 8px; display: flex; flex-direction: column; gap: 8px; flex: 1; }
+.kanban-empty { color: var(--text-dim); font-size: 0.75rem; text-align: center; padding: 12px 0; }
+
+/* §41 监督台卡片 */
+.sup-card {
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 10px; cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+.sup-card:hover { border-color: var(--border-accent); }
+.sup-head { display: flex; justify-content: space-between; align-items: center; gap: 6px; margin-bottom: 6px; }
+.sup-head .sym { font-weight: 700; color: var(--accent); }
+.sup-card .badge { font-size: 0.66rem; padding: 1px 6px; }
+.sup-meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 0.7rem; margin-bottom: 6px; }
+.chip-mini {
+  padding: 1px 7px; border-radius: 999px; font-size: 0.68rem;
+  background: rgba(100,200,255,0.12); color: #64c8ff; border: 1px solid rgba(100,200,255,0.25);
+}
+.sup-scores { display: flex; gap: 16px; margin-bottom: 6px; }
+.sup-question {
+  font-size: 0.72rem; color: var(--text-secondary); line-height: 1.5;
+  padding: 6px 8px; background: var(--bg-surface); border-radius: var(--radius-sm);
+}
+.sup-question.big { font-size: 0.85rem; padding: 10px; margin-top: 10px; color: var(--text-primary); }
+
+/* ── 模拟验证页 ── */
+.sim-head { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin: 4px 0 10px; }
+.sim-counts { display: flex; gap: 10px; }
+.count-chip {
+  padding: 4px 12px; border-radius: 999px; font-size: 0.78rem;
+  background: var(--bg-elevated); border: 1px solid var(--border);
+  color: var(--text-secondary);
+}
+.count-chip b { margin-left: 4px; font-size: 0.9rem; color: var(--text-primary); }
+.count-chip b.accent { color: var(--accent); }
+.count-chip b.warning { color: var(--warning); }
+
+.tab-bar {
+  display: flex; gap: 4px; margin-bottom: 14px; padding: 4px;
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-md);
+  width: fit-content;
+}
+.tab-btn {
+  padding: 6px 16px; border-radius: var(--radius-sm); font-size: 0.8rem;
+  color: var(--text-muted); cursor: pointer; transition: all var(--transition-fast);
+  user-select: none;
+}
+.tab-btn:hover { color: var(--text-primary); }
+.tab-btn.active {
+  background: var(--accent-glow); color: var(--accent); font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--border-accent);
+}
+
+/* 模拟状态颜色 */
+.status-cell { font-size: 0.75rem; font-weight: 600; }
+.status-cell.sim-open { color: var(--long); }
+.status-cell.sim-watching, .status-cell.sim-entry_zone_reached { color: var(--blue); }
+.status-cell.sim-revalidating { color: var(--warning); }
+.status-cell.sim-armed { color: var(--accent); }
+.status-cell.sim-simulated_entry { color: var(--accent); }
+.status-cell.sim-closed, .status-cell.sim-expired, .status-cell.sim-cancelled,
+.status-cell.sim-invalidated, .status-cell.sim-missed { color: var(--text-muted); }
+
+/* §37 统计 */
+.stats-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+}
+.stat-tile {
+  padding: 10px 14px; background: var(--bg-elevated); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 2px;
+}
+.stat-tile .label { font-size: 0.7rem; color: var(--text-muted); }
+.stat-tile .value { font-size: 1.15rem; font-weight: 700; color: var(--accent); }
+.bucket-block { margin-top: 12px; }
+.bucket-title { font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); margin: 6px 0 6px; }
+
+/* §71 历史回放 */
+.replay-card .card-header { margin-bottom: 8px; }
+.replay-chain { display: flex; flex-direction: column; gap: 4px; font-size: 0.75rem; }
+.replay-chain .label { color: var(--text-muted); display: inline-block; min-width: 76px; }
+.replay-chain .value { color: var(--text-primary); }
+
+/* ── 数据健康覆盖率 ── */
+.coverage-bar {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); margin: 10px 0 14px; font-size: 0.85rem;
+}
+.coverage-bar .label { color: var(--text-muted); }
+.coverage-bar .value { font-weight: 700; font-size: 1.05rem; }
+.coverage-bar .sub { color: var(--text-secondary); font-size: 0.78rem; }
+.coverage-bar .critical { color: var(--short); font-size: 0.78rem; font-weight: 600; }
+
+/* ── Drawer §17 B 双值 ── */
+.drawer-title .dual-hint { font-size: 0.68rem; color: var(--text-dim); margin-left: 6px; text-transform: none; }
+.dual-scores { display: flex; flex-direction: column; gap: 4px; }
+.dual-scores > div {
+  display: flex; align-items: baseline; gap: 8px; font-size: 0.82rem;
+  padding: 4px 0; border-bottom: 1px dashed var(--border);
+}
+.dual-scores .label { color: var(--text-muted); min-width: 64px; }
+.dual-scores .rec { color: var(--text-dim); font-family: var(--font-mono); }
+.dual-scores .cur { font-weight: 700; font-family: var(--font-mono); }
+.dual-scores .arrow { font-size: 0.8rem; font-weight: 700; }
+
+/* ── Drawer §17 D 生命周期 ── */
+.lifecycle { display: flex; flex-direction: column; }
+.life-node { display: flex; align-items: center; gap: 10px; position: relative; padding: 2px 0; }
+.life-node .dot {
+  width: 9px; height: 9px; border-radius: 50%;
+  background: var(--bg-hover); border: 2px solid var(--border-strong); flex-shrink: 0;
+}
+.life-node .label { font-size: 0.8rem; color: var(--text-muted); }
+.life-node .line {
+  position: absolute; left: 4px; top: 14px; bottom: -8px; width: 2px;
+  background: var(--border-strong);
+}
+.life-cycle { display: flex; }
+.life-node.done .dot { background: var(--long); border-color: var(--long); }
+.life-node.done .label { color: var(--text-secondary); }
+.life-node.current .dot {
+  background: var(--accent); border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.life-node.current .label { color: var(--accent); font-weight: 700; }
+.life-node.upcoming .dot { background: var(--bg-hover); }
+
+/* ── Drawer §51 模拟状态 ── */
+.sim-block {
+  padding: 10px; border-radius: var(--radius-sm); background: var(--bg-elevated);
+  border: 1px solid var(--border); margin-bottom: 10px;
+}
+.sim-block.live { border-color: rgba(34,197,94,0.35); }
+.sim-block.result { border-color: rgba(45,212,191,0.3); }
+.sim-title { font-size: 0.78rem; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+.drawer-tp .value { font-family: var(--font-mono); }
+.drawer-tp .value.long { color: var(--long); font-family: var(--font-sans); }
+.drawer-tp .value.short { color: var(--short); font-family: var(--font-sans); }
+.drawer-tp .value.warn { color: var(--warning); font-family: var(--font-sans); }
+
+/* 时间线 item reason（模拟事件流） */
+.timeline-item .reason { font-size: 0.7rem; color: var(--text-muted); display: block; }
+
+@media (max-width: 1200px) {
+  .kanban { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 768px) {
+  .kanban { grid-template-columns: repeat(2, 1fr); }
+  .sub-tiles { grid-template-columns: repeat(2, 1fr); }
+}

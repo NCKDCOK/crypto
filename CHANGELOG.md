@@ -27,6 +27,45 @@
 
 ---
 
+## [V1.3] — 状态监督 × 模拟验证 × UI 重构（P1-P3 批次）
+
+依据《资金行为雷达_V1.3_状态监督_模拟验证_UI重构_更新计划》§5-§10（P1 监督）、§33-§39（P2 模拟验证）、§41-§57（P3 UI 与关联 API）。
+P0 批次之上完成：状态分池监督 + 生命周期追踪、推荐快照 + 模拟验证 12 状态闭环、5 页 SPA 重构 + 侧滑 Drawer + 监督台 Kanban + 统计与回放。
+
+### 监督层（P1）
+
+- **State Pool Manager（§5-§6）**：`src/state/pool.py` 8 池（anomaly/watch/confirmed/continuation/risk/exit/cooldown/sleeping），每池 PoolSpec 独立监督规则（升级/降级/滞留/撤离入口）、监督级别（low/medium/high）、池级监督问题 `supervision_question` 8 条中文（§41）。
+- **SupervisorEngine（§5-§7）**：`src/state/supervisor.py` 状态迁移滞回（单次评分下降不降级 / 连续失去证据才降级 / 明确 Veto 立即失效）、`condition_fail_streak`、`last_action`、进入池/状态时间戳；§8 生命周期自发现→撤离全链路追踪。
+- **监督 API（§63-§65）**：`GET /api/supervision`（按池 Kanban 矩阵）、`GET /api/supervision/{symbol}`（详情 + §42 状态日志时间线，`transition_history` 过滤单币）。
+
+### 模拟层（P2）
+
+- **RecommendationSnapshot（§33）**：19 字段 frozen dataclass，immutable，不被后续实时数据覆盖；相同 Setup 版本化；`trade_plan_id`/`snapshot_id` 沉淀。
+- **Simulation Queue + Revalidation（§34-§35）**：正式推荐（START_CONFIRMED/CONTINUATION）自动入队，COOLDOWN/SUSPECTED_START 不入正式模拟；12 状态（WATCHING→ENTRY_ZONE_REACHED→REVALIDATING→ARMED→SIMULATED_ENTRY→OPEN→CLOSED/EXPIRED/CANCELLED/INVALIDATED/MISSED）；Entry Zone 到达后二次验证（方向有效→入场 / Withdrawal→取消 / Direction Flip→取消 / stale→不入场）。
+- **Position Monitoring + 动态退出（§36-§39）**：MFE/MAE/TP1-3/Stop/Withdrawal Exit；静态跟踪直到原 TP1 或失效（孰先），24h 上限 → TIME_EXPIRED；动态退出与固定计划双轨记录（`static_plan_result`）。
+- **统计（§37-§39）**：推荐次数/进入观察区/通过 Revalidation/模拟入场/TP1·TP2/失效/撤离退出 + 平均 MFE/MAE + 分桶（机会分/确认度/Setup/方向/时间框架/市场背景）+ Setup 转化率。
+- **模拟 API（§63-§65）**：`GET /api/simulations`、`GET /api/simulations/{id}`（item+position+events+result）、`GET /api/statistics`。
+
+### UI / 关联 API（P3）
+
+- **5 页 SPA 重构**：`static/js/app.js` 全新重写（~1500 行）+ `static/js/api.js`（15 个 API 方法）+ `static/index.html`（59 行）+ `static/css/style.css` 追加 V1.3 P3 段；首页/全市场/监督台/模拟验证/数据健康，冗余调试页合并或删除（DoD §68）。
+- **首页（§15-§16/§69）**：top-stats 六字段、Top Opportunities ≤10 不凑满、COOLDOWN 不入榜、主值取 `decision_snapshot.decision` 冻结值（§55）、实时双值仅入 Drawer（§56）、趋势箭头（§54 基线 + diff>±1）、`homeMateriallyChanged` 节流（§12/§66.8 首页不秒级重排）。
+- **Side Drawer A–I（§17/§28-§34/§41-§42）**：当前结论/核心评分双值/当前计划/生命周期/评分明细/资金摘要（OI 5m·15m·1h + Taker B/S + CVD + 现货×合约 + 多空推动）/突破生命周期/Evidence-Veto/模拟状态。
+- **监督台（§41-§42/§70）**：6 列 Kanban（anomaly/watch/confirmed/continuation/risk/exit）+ 池级监督问题 + 监督 Drawer（含 §42 时间线）。
+- **模拟验证（§33-§39/§71）**：sim-counts + 5 Tab（等待入场/运行中/已结束/统计/历史回放），回放展示动态结果 vs 固定 TP/Stop 对比。
+- **数据健康（§46）**：覆盖率大条 + 交易对×流明细 + 核心流中断横幅。
+- **轮询节奏（§12）**：priceTimer 4s / dataTimer 10s / slowTimer 30s / topTimer 60s。
+
+### 测试 / 文档
+
+- **P1-P3 Tests**：`tests/api/test_v13_api.py` 9 用例（Kanban 池分类/Top10 空态/监督详情 timeline/模拟列表/统计结构）+ 既有全量回归。全套 **728 passed，12 warnings（均为既有弃用告警）**。
+- **UI 冒烟（§66.8/§67）**：`scripts/ui_seed_server.py`（8051 种子服务器，9 币种全状态矩阵）经 Playwright 验证 6 项——首页不秒级重排、Top10 不凑满、COOLDOWN 不入榜、Drawer 内容稳定、Simulation 状态正确、监督台 Pool 正确；另修复 `renderHomeCard` 子评分 tiles 常量拼接崩溃 bug。实盘 30-60 分钟冒烟受本机 Binance 地理封锁（HTTP 451）阻塞，待非封锁环境执行。
+- **文档**：新增 `docs/UI.md`（UI 架构：页面清单/轮询节奏/首页/监督台/模拟验证/数据健康/API 对应）。
+
+**测试：728 passed，12 warnings。仅影子/纸面信号，禁止自动交易。**
+
+---
+
 ## [V1.2] — 资金生命周期 × 市场背景 × 结构位置 × 置信度 × Trade Plan
 
 依据《资金行为雷达_V1.2》修改方案（25 执行步骤 + 用户追加持久化/恢复层）。
