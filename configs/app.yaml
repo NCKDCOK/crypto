@@ -6,3 +6,12 @@ ws_route_public: /public
 rest_base_url: https://fapi.binance.com
 max_streams_per_connection: 1024
 connection_max_lifetime_hours: 24
+
+# 出口代理（本机受限环境用；生产留空则直连）
+proxy: "http://127.0.0.1:7890"
+
+# 编排节奏（秒）
+light_scan_interval_s: 20        # Stage1 轻扫描周期
+deep_compute_interval_s: 2.0     # Stage2 深度计算周期
+candidate_refresh_interval_s: 60 # 候选集刷新周期
+deep_max_symbols: 40             # Stage2 同时深度分析的 symbol 上限（WS 订阅上限内）

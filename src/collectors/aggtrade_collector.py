@@ -70,11 +70,13 @@ class TradeDedup:
 
     def __init__(self) -> None:
         self._max_trade_ids: dict[str, int] = {}
+        self.dropped_count: int = 0
 
     def should_accept(self, symbol: str, trade_id: int) -> bool:
         """判断该 trade 是否应该接受（trade_id > 已见最大值）。"""
         max_seen = self._max_trade_ids.get(symbol)
         if max_seen is not None and trade_id <= max_seen:
+            self.dropped_count += 1
             return False
         self._max_trade_ids[symbol] = trade_id
         return True

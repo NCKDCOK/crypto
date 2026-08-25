@@ -1,10 +1,11 @@
-"""Replay Engine — 确定性重放。
+"""Replay Engine — 确定性重放（与 live 同一套核心逻辑）。
 
-依据：SYSTEM_DESIGN.md §12, TESTING.md §4
+依据：SYSTEM_DESIGN.md §12, 改造任务文档 §19, TESTING.md §4
 - 事件按 event_time 顺序重放（同时间按 trade_id）
 - 使用 TestClock，不依赖 wall time
 - 相同输入 → 相同 feature/state 输出（deterministic）
-- 保存原始事件子集 + FeatureSnapshot + 状态转换 + evidence/veto
+- confidence 由 FreshnessWatchdog + ConfidenceTracker 真实派生（不再注入 override）
+  未提供的关键流可simulate_healthy_streams 模拟为 OK（仅 replay，记录于 provenance）
 """
 
 from __future__ import annotations
@@ -12,13 +13,34 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 from src.clock import TestClock
-from src.domain import AnalysisEvent, FeatureSnapshot, TradeEvent
+from src.domain import (
+    AnalysisEvent,
+    ConfidenceState,
+    FeatureSnapshot,
+    FundingRateSnapshot,
+    HealthLevel,
+    HealthStatus,
+    KlineEvent,
+    OpenInterestSnapshot,
+    TradeEvent,
+)
 from src.features.engine import FeatureEngine
+from src.health.confidence import ConfidenceTracker
+from src.health.freshness_watchdog import FreshnessBudget, FreshnessWatchdog, StreamType
 from src.state_machine.machine import StateMachine
-from src.windows.rolling_window import RollingWindow
+
+
+@dataclass
+class ReplayInput:
+    """replay 输入（多流）。"""
+
+    trades: list[TradeEvent] = field(default_factory=list)
+    oi_snapshots: list[OpenInterestSnapshot] = field(default_factory=list)
+    klines: list[KlineEvent] = field(default_factory=list)
+    funding_snapshots: list[FundingRateSnapshot] = field(default_factory=list)
 
 
 @dataclass
@@ -31,128 +53,169 @@ class ReplayResult:
     final_states: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass
-class OutcomeRecord:
-    """候选事件的后续表现记录。"""
-
-    symbol: str
-    state: str
-    direction: str | None
-    asof: int
-    # 后续 1m/5m/15m/1h 最大有利/不利变动
-    max_favorable_1m: float | None = None
-    max_adverse_1m: float | None = None
-    max_favorable_5m: float | None = None
-    max_adverse_5m: float | None = None
-    duration_s: float | None = None
-    is_quick_fail: bool = False
+def _stream_id(prefix: str, symbol: str) -> str:
+    return f"{prefix}:{symbol}"
 
 
 class ReplayEngine:
     """确定性 replay 引擎。
 
-    按事件时间顺序重放 TradeEvent 序列，通过 FeatureEngine + StateMachine
-    产出特征快照和状态转换。结果必须可重复。
+    按 event_time 顺序重放多流事件，通过 FeatureEngine + StateMachine
+    产出特征快照和状态转换。confidence 由 health 真实派生。结果必须可重复。
     """
 
     def __init__(
         self,
         feature_engine: FeatureEngine | None = None,
         state_machine: StateMachine | None = None,
-        window_ms: int = 30_000,
+        simulate_healthy_streams: bool = False,
     ) -> None:
         self.feature_engine = feature_engine or FeatureEngine()
         self.state_machine = state_machine or StateMachine()
-        self.window_ms = window_ms
+        self.simulate_healthy_streams = simulate_healthy_streams
 
-    def replay(
-        self,
-        trades: Sequence[TradeEvent],
-        confidence_overrides: dict[str, str] | None = None,
-    ) -> ReplayResult:
-        """重放 trade 序列。
+    def replay(self, data: ReplayInput | Sequence[TradeEvent]) -> ReplayResult:
+        """重放事件序列。
 
         Args:
-            trades: 按 event_time 排序的 TradeEvent 列表。
-            confidence_overrides: symbol → ConfidenceState 覆盖。
+            data: ReplayInput（多流）或纯 TradeEvent 列表（向后兼容）。
 
         Returns:
             ReplayResult
         """
-        if not trades:
+        if isinstance(data, ReplayInput):
+            trades = data.trades
+            oi = data.oi_snapshots
+            klines = data.klines
+            funding = data.funding_snapshots
+        else:
+            trades = list(data)
+            oi, klines, funding = [], [], []
+
+        if not trades and not oi and not klines and not funding:
             return ReplayResult(events_processed=0)
 
-        # 排序：event_time，同时间按 trade_id
+        # 排序：event_time，同时间按 trade_id（仅 trades）
         sorted_trades = sorted(trades, key=lambda t: (t.event_time, t.trade_id))
+        sorted_oi = sorted(oi, key=lambda s: s.receive_time)
+        sorted_klines = sorted(klines, key=lambda k: k.event_time)
+        sorted_funding = sorted(funding, key=lambda f: f.receive_time)
 
-        # 使用 TestClock，初始时间为第一条 trade 的 event_time
-        start_time = sorted_trades[0].event_time
+        all_times = (
+            [t.receive_time for t in sorted_trades]
+            + [s.receive_time for s in sorted_oi]
+            + [k.event_time for k in sorted_klines]
+            + [f.receive_time for f in sorted_funding]
+        )
+        start_time = min(all_times) if all_times else 0
         clock = TestClock(initial_ms=start_time)
 
-        # 设置 confidence overrides
-        if confidence_overrides:
-            for symbol, conf in confidence_overrides.items():
-                from src.domain import ConfidenceState
-                self.state_machine.confidence._confidence[symbol] = ConfidenceState(conf)
+        symbols = sorted({t.symbol for t in sorted_trades} | {s.symbol for s in sorted_oi}
+                         | {k.symbol for k in sorted_klines} | {f.symbol for f in sorted_funding})
 
-        # 滚动窗口
-        window = RollingWindow[TradeEvent](window_ms=self.window_ms)
+        # Health: 注册关键流
+        watchdog = FreshnessWatchdog(FreshnessBudget(), clock)
+        confidence_tracker = self.state_machine.confidence
+        for sym in symbols:
+            watchdog.register_stream(_stream_id("aggTrade", sym), sym, StreamType.AGGTRADE)
+            watchdog.register_stream(_stream_id("kline", sym), sym, StreamType.KLINE)
+            watchdog.register_stream(_stream_id("oi_poller", sym), sym, StreamType.OI_POLLER)
+            if self.simulate_healthy_streams:
+                for prefix in ("aggTrade", "kline", "oi_poller"):
+                    st = watchdog.get_stream(_stream_id(prefix, sym))
+                    st.connected = True
+                    st.last_receive_time = start_time
+                    st.last_event_time = start_time
+
+        # 合并所有事件按时间推进
+        events: list[tuple[int, str, object]] = []
+        for t in sorted_trades:
+            events.append((t.receive_time, "trade", t))
+        for s in sorted_oi:
+            events.append((s.receive_time, "oi", s))
+        for k in sorted_klines:
+            events.append((k.event_time, "kline", k))
+        for f in sorted_funding:
+            events.append((f.receive_time, "funding", f))
+        events.sort(key=lambda e: e[0])
 
         transitions: list[AnalysisEvent] = []
         snapshots: list[FeatureSnapshot] = []
+        processed = 0
 
-        for trade in sorted_trades:
-            clock.set(trade.receive_time)
-            window.add(trade.receive_time, trade)
+        for ts, kind, ev in events:
+            clock.set(ts)
+            sym = getattr(ev, "symbol")
+            if kind == "trade":
+                self.feature_engine.add_trade(sym, ev)
+                watchdog.record_event(_stream_id("aggTrade", sym), ev.event_time, ev.receive_time)
+            elif kind == "oi":
+                self.feature_engine.add_oi_snapshot(ev)
+                watchdog.record_event(_stream_id("oi_poller", sym), ev.event_time, ev.receive_time)
+            elif kind == "kline":
+                self.feature_engine.add_kline(ev)
+                watchdog.record_event(_stream_id("kline", sym), ev.event_time, ev.receive_time)
+            elif kind == "funding":
+                self.feature_engine.add_funding_snapshot(ev)
+            processed += 1
 
-            # 获取窗口内 trades
-            window_trades = window.get_items(trade.receive_time)
+            # 每个 tick 派生 confidence 并计算 snapshot + 状态机
+            self._derive_and_process(sym, watchdog, confidence_tracker, ts, transitions, snapshots)
 
-            # 计算 FeatureSnapshot
-            snap = self.feature_engine.compute_snapshot(
-                trade.symbol, window_trades, trade.receive_time,
-            )
-
-            # 状态机处理
-            event = self.state_machine.process(snap, trade.receive_time)
-            if event is not None:
-                transitions.append(event)
-
-        # 记录最终状态
-        final_states = {
-            sym: ssm.state.value
-            for sym, ssm in self.state_machine._symbols.items()
-        }
-
+        final_states = {sym: ssm.state.value for sym, ssm in self.state_machine._symbols.items()}
         return ReplayResult(
-            events_processed=len(sorted_trades),
+            events_processed=processed,
             transitions=transitions,
             snapshots=snapshots,
             final_states=final_states,
         )
 
-    def replay_deterministic(
+    def _derive_and_process(
         self,
-        trades: Sequence[TradeEvent],
-    ) -> ReplayResult:
-        """确定性重放 — 相同输入必须得到相同输出。
+        symbol: str,
+        watchdog: FreshnessWatchdog,
+        confidence_tracker: ConfidenceTracker,
+        now_ms: int,
+        transitions: list[AnalysisEvent],
+        snapshots: list[FeatureSnapshot],
+    ) -> None:
+        health_statuses = [
+            watchdog.check_health(_stream_id(p, symbol))
+            for p in ("aggTrade", "kline", "oi_poller")
+        ]
+        if self.simulate_healthy_streams:
+            # 模拟缺失流为 OK（仅 replay）
+            health_statuses = [
+                hs if hs.status != HealthLevel.FAIL else HealthStatus(
+                    stream=hs.stream, symbol=hs.symbol, status=HealthLevel.OK,
+                    last_event_time=now_ms, last_receive_time=now_ms, age_ms=0,
+                    connected=True, subscribed=True, reason="simulated_healthy",
+                )
+                for hs in health_statuses
+            ]
+        confidence = confidence_tracker.update(symbol, health_statuses)
+        health_summary = {hs.stream: hs.status.value for hs in health_statuses}
+        self.feature_engine.set_health(symbol, health_summary)
+        snap = self.feature_engine.compute_snapshot(symbol, now_ms)
+        snapshots.append(snap)
+        event = self.state_machine.process(snap, now_ms)
+        if event is not None:
+            transitions.append(event)
 
-        连续重放两次，验证结果一致。
-        """
-        result1 = self.replay(trades)
-        # 重置引擎
+    def replay_deterministic(self, data: ReplayInput | Sequence[TradeEvent]) -> ReplayResult:
+        """确定性重放 — 相同输入必须得到相同输出（连续重放两次验证一致）。"""
+        result1 = self.replay(data)
+        # 重置引擎（fresh engine + state machine）
         self.feature_engine = FeatureEngine()
         self.state_machine = StateMachine()
-        result2 = self.replay(trades)
+        result2 = self.replay(data)
 
-        # 验证一致性
         assert result1.events_processed == result2.events_processed
         assert len(result1.transitions) == len(result2.transitions)
         for t1, t2 in zip(result1.transitions, result2.transitions):
             assert t1.new_state == t2.new_state
             assert t1.previous_state == t2.previous_state
             assert t1.symbol == t2.symbol
-
         return result2
 
 
@@ -179,10 +242,7 @@ def save_replay_result(result: ReplayResult, path: Path) -> None:
 
 
 def load_trades_from_jsonl(path: Path) -> list[TradeEvent]:
-    """从 JSONL 文件加载 TradeEvent 序列。
-
-    每行一个 JSON 对象，字段对应 Binance aggTrade payload。
-    """
+    """从 JSONL 文件加载 TradeEvent 序列（Binance aggTrade payload）。"""
     from decimal import Decimal
     from src.domain import AggressorSide
 
@@ -192,16 +252,16 @@ def load_trades_from_jsonl(path: Path) -> list[TradeEvent]:
             line = line.strip()
             if not line:
                 continue
-            data = json.loads(line)
-            m = data.get("m")
-            price = Decimal(str(data.get("p", "0")))
-            qty = Decimal(str(data.get("q", "0")))
+            d = json.loads(line)
+            m = d.get("m")
+            price = Decimal(str(d.get("p", "0")))
+            qty = Decimal(str(d.get("q", "0")))
             trades.append(TradeEvent(
-                symbol=data.get("s", ""),
+                symbol=d.get("s", ""),
                 exchange="binance",
-                trade_id=int(data.get("a", 0)),
-                event_time=int(data.get("T", 0)),
-                receive_time=int(data.get("T", 0)),
+                trade_id=int(d.get("a", 0)),
+                event_time=int(d.get("T", 0)),
+                receive_time=int(d.get("T", 0)),
                 price=price,
                 qty=qty,
                 quote_notional=price * qty,

@@ -25,6 +25,9 @@ class FlowFeatures:
     """资金流特征结果。"""
 
     taker_delta: float | None
+    taker_buy_volume: float | None
+    taker_sell_volume: float | None
+    delta_ratio: float | None
     cvd: float
     cvd_slope: float | None
     cvd_slope_z: float | None
@@ -51,6 +54,25 @@ def compute_taker_delta(trades: Sequence[TradeEvent]) -> float | None:
         if t.aggressor_side == AggressorSide.SELL
     )
     return buy_notional - sell_notional
+
+
+def compute_taker_buy_sell_volume(trades: Sequence[TradeEvent]) -> tuple[float | None, float | None]:
+    """计算窗口内主动买/卖名义额。
+
+    Returns:
+        (taker_buy_volume, taker_sell_volume)，空窗口为 None。
+    """
+    if not trades:
+        return None, None
+    buy = sum(
+        float(t.quote_notional) for t in trades
+        if t.aggressor_side == AggressorSide.BUY
+    )
+    sell = sum(
+        float(t.quote_notional) for t in trades
+        if t.aggressor_side == AggressorSide.SELL
+    )
+    return buy, sell
 
 
 class CVDTracker:
@@ -164,8 +186,16 @@ def compute_flow_features(
     slope_z = cvd_tracker.get_cvd_slope_z(symbol)
     accel_z = cvd_tracker.get_cvd_accel_z(symbol)
 
+    buy_vol, sell_vol = compute_taker_buy_sell_volume(window_trades)
+    delta_ratio: float | None = None
+    if buy_vol is not None and sell_vol is not None and (buy_vol + sell_vol) > 0:
+        delta_ratio = (buy_vol - sell_vol) / (buy_vol + sell_vol)
+
     return FlowFeatures(
         taker_delta=delta,
+        taker_buy_volume=buy_vol,
+        taker_sell_volume=sell_vol,
+        delta_ratio=delta_ratio,
         cvd=cvd,
         cvd_slope=slope,
         cvd_slope_z=slope_z,

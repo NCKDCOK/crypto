@@ -39,6 +39,7 @@ class WSStreamConfig:
     reconnect_delay_ms: int = 1000
     max_reconnect_delay_ms: int = 30_000
     ping_interval_s: float = 180.0  # 3 分钟
+    proxy: str | None = None  # 出口代理（受限环境用）
 
     def build_url(self) -> str:
         """构建组合流 URL。"""
@@ -106,13 +107,15 @@ class BaseWSCollector(ABC):
     async def _connect_and_listen(self) -> None:
         """单次连接的生命周期：连接 → 接收 → 断开。"""
         url = self._build_url()
-        logger.info("ws_connecting url=%s", url)
+        logger.info("ws_connecting url=%s proxy=%s", url, bool(self.config.proxy))
         try:
-            async with connect(
-                url,
-                ping_interval=self.config.ping_interval_s,
-                ping_timeout=600,
-            ) as ws:
+            connect_kwargs: dict = {
+                "ping_interval": self.config.ping_interval_s,
+                "ping_timeout": 600,
+            }
+            if self.config.proxy:
+                connect_kwargs["proxy"] = self.config.proxy
+            async with connect(url, **connect_kwargs) as ws:
                 self._ws = ws
                 self.stats.connected = True
                 self.stats.subscribed = True

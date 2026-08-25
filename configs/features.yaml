@@ -2,3 +2,10 @@
 # 依据 docs/ANALYSIS_MODEL.md
 baseline_window: 1h
 epsilon: 1.0  # FlowImpact 的 ε（USDT 名义）
+
+# 多时间尺度滚动窗口（trade flow）
+trade_flow_windows: ["5s", "15s", "30s", "1m", "5m"]
+# Kline 上下文周期
+kline_context_intervals: ["1m", "5m", "15m", "1h"]
+# 基线样本上限（rolling）
+baseline_max_samples: 360

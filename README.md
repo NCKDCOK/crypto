@@ -21,7 +21,40 @@
 
 ## 项目状态
 
-📋 **纯文档/规划阶段** — 控制文件已就绪，代码零起步。按 Gate 流程推进。
+🟢 **V1 Runtime 已落地（实盘数据接入）** — 全部数据采集器已接入 runtime 并收到真实 Binance 数据，Data Health 真实工作，Evidence 不被擦除，多时间窗口生效，两阶段 Radar 运行。
+
+### 已 Live 的数据
+
+| 数据源 | 状态 | 说明 |
+|---|---|---|
+| aggTrade (WS) | ✅ LIVE | 实时成交、aggressor side、CVD、taker delta、trade_id 去重 |
+| Kline 1m (WS) | ✅ LIVE | close-bar 确认、多周期 context |
+| Open Interest (REST) | ✅ LIVE | 基础资产数量、Δ30s/1m/5m、velocity、accel、带容差 as-of |
+| Funding/Premium (REST) | ✅ LIVE | 拥挤度上下文、soft veto |
+| 24h ticker (REST) | ✅ LIVE | 动态 universe 发现 + Stage1 扫描 |
+
+### 当前 Universe
+
+动态：Binance USDT-M 永续 ACTIVE/TRADING，按 24h quote volume 排序 top-N（默认 100，可配 `configs/symbols.yaml`），支持 blacklist/whitelist/liquidity floor/max_symbols。
+Stage2 深度分析候选 ≤ `deep_max_symbols`（默认 40）。
+
+### 如何启动
+
+```bash
+uvicorn src.main:app --host 127.0.0.1 --port 8050
+# 受限网络环境在 configs/app.yaml 设置 proxy
+```
+
+### 如何测试
+
+```bash
+pytest -q                                          # 全量离线测试
+python scripts/live_smoke_test.py --duration 600   # 10 分钟 live 冒烟（BTC/ETH/SOL）
+```
+
+### 当前限制
+
+详见 [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md)：冷启动 baseline 不稳定、InMemory 存储（重启不保留）、无 Depth/OFI/Liquidation、无机会分（评分延后 Gate 8）。
 
 ---
 
@@ -45,6 +78,18 @@
 | [docs/DATA_HEALTH.md](docs/DATA_HEALTH.md) | freshness budget、HealthLevel、ConfidenceState 派生、限频 |
 | [docs/ANALYSIS_MODEL.md](docs/ANALYSIS_MODEL.md) | 特征清单、证据族、Veto 清单、检测器职责 |
 | [docs/TESTING.md](docs/TESTING.md) | 测试策略、fixture 规范、replay 确定性 |
+
+### Runtime 实施文档（V1）
+
+| 文档 | 内容 |
+|------|------|
+| [docs/RUNTIME_INTEGRATION_AUDIT.md](docs/RUNTIME_INTEGRATION_AUDIT.md) | 集成审计：orphan 模块 / demo override / 缺失集成 |
+| [docs/RUNTIME_ARCHITECTURE.md](docs/RUNTIME_ARCHITECTURE.md) | 运行时编排层架构与不变量 |
+| [docs/LIVE_DATA_FLOW.md](docs/LIVE_DATA_FLOW.md) | 端到端实盘数据流（ASCII） |
+| [docs/FEATURE_CATALOG.md](docs/FEATURE_CATALOG.md) | 全部 Feature 目录与追溯 |
+| [docs/DETECTOR_LOGIC.md](docs/DETECTOR_LOGIC.md) | 检测器证据链 / Veto / subtype |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | 启动 / 配置 / smoke test / 运维 |
+| [docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md) | 已知限制与风险 |
 
 ### Epic Specs（按 Gate 推进）
 

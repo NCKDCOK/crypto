@@ -1,7 +1,31 @@
 # 检测器阈值配置
 # 依据 docs/ANALYSIS_MODEL.md
-# V1 仅 anomaly 阈值；startup/false-start veto 阈值后续 Gate 补充
+# anomaly
 anomaly_volume_z: 3.0
 anomaly_trade_count_z: 3.0
 anomaly_price_accel_z: 2.5
 anomaly_taker_delta_z: 2.5
+
+# startup
+startup_oi_expansion_threshold: 0.0
+startup_min_efficiency: 0.2
+startup_max_retrace: 0.8
+startup_min_evidence: 3
+
+# false start veto
+veto_rapid_retrace_threshold: 0.7
+veto_absorption_flow_impact_threshold: 0.001
+veto_absorption_delta_threshold: 10000.0
+veto_crowding_percentile_threshold: 95.0
+veto_one_bar_spike_window: "5s"
+veto_one_bar_spike_retrace: 0.6
+
+# continuation / exhaustion / withdrawal
+continuation_min_oi_maintain: 0.0
+exhaustion_min_divergence_count: 2
+withdrawal_min_evidence_count: 3
+
+# light scanner (Stage1)
+light_relative_volume_z: 2.5
+light_trade_count_z: 2.5
+light_oi_change_threshold: 0.02

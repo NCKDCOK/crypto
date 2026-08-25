@@ -113,7 +113,7 @@ class EvidenceFamily(str, Enum):
 
 
 class VetoType(str, Enum):
-    """Veto 类型。依据 docs/ANALYSIS_MODEL.md §4。"""
+    """Veto 类型。依据 docs/ANALYSIS_MODEL.md §4 + 改造任务文档 §16。"""
 
     DATA_STALE = "data_stale"
     RAPID_RETRACE = "rapid_retrace"
@@ -122,6 +122,7 @@ class VetoType(str, Enum):
     NO_ACCEPTANCE = "no_acceptance"
     LOW_EFFICIENCY_ABSORPTION = "low_efficiency_absorption"
     CROWDING_EXTREME = "crowding_extreme"
+    ONE_BAR_SPIKE = "one_bar_spike"
 
 
 class VetoSeverity(str, Enum):

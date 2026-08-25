@@ -29,6 +29,13 @@ class AppConfig(BaseModel):
     rest_base_url: str = Field(default="https://fapi.binance.com")
     max_streams_per_connection: int = Field(default=1024, ge=1)
     connection_max_lifetime_hours: float = Field(default=24.0, gt=0)
+    # 出口代理（受限环境用）；空字符串/None 表示直连
+    proxy: str | None = Field(default=None)
+    # 编排节奏（秒）
+    light_scan_interval_s: float = Field(default=20.0, gt=0)
+    deep_compute_interval_s: float = Field(default=2.0, gt=0)
+    candidate_refresh_interval_s: float = Field(default=60.0, gt=0)
+    deep_max_symbols: int = Field(default=40, ge=1, le=1024)
 
 
 class FreshnessBudget(BaseModel):
@@ -40,6 +47,9 @@ class FreshnessBudget(BaseModel):
     oi_poller_multiplier: int = Field(default=2, ge=1)
     funding_premium_ms: int = Field(default=60_000, ge=1000)
     oi_lookup_tolerance_ms: int = Field(default=15_000, ge=100)
+    # OI / Funding 轮询周期（秒）
+    oi_poll_interval_s: float = Field(default=5.0, gt=0)
+    funding_poll_interval_s: float = Field(default=30.0, gt=0)
 
 
 class RateLimiterConfig(BaseModel):
@@ -63,6 +73,13 @@ class FeaturesConfig(BaseModel):
 
     baseline_window: str = Field(default="1h")
     epsilon: float = Field(default=1.0, gt=0, description="FlowImpact 的 ε")
+    trade_flow_windows: list[str] = Field(
+        default_factory=lambda: ["5s", "15s", "30s", "1m", "5m"]
+    )
+    kline_context_intervals: list[str] = Field(
+        default_factory=lambda: ["1m", "5m", "15m", "1h"]
+    )
+    baseline_max_samples: int = Field(default=360, ge=10)
 
 
 class StateMachineConfig(BaseModel):
@@ -81,6 +98,10 @@ class SymbolsConfig(BaseModel):
 
     quote_asset: str = Field(default="USDT")
     exclude_patterns: list[str] = Field(default_factory=list)
+    whitelist: list[str] = Field(default_factory=list)
+    liquidity_floor_usdt: float = Field(default=5_000_000, ge=0)
+    top_n: int = Field(default=100, ge=1)
+    max_symbols: int = Field(default=100, ge=1)
     activity_tiers: dict[str, float] = Field(
         default_factory=lambda: {
             "active": 50_000_000,  # 24h 成交额 > 50M USDT
@@ -90,12 +111,33 @@ class SymbolsConfig(BaseModel):
 
 
 class DetectorsConfig(BaseModel):
-    """检测器阈值配置（V1 仅 anomaly 阈值，其余后续 Gate 补充）。"""
+    """检测器阈值配置。"""
 
+    # anomaly
     anomaly_volume_z: float = Field(default=3.0, gt=0)
     anomaly_trade_count_z: float = Field(default=3.0, gt=0)
     anomaly_price_accel_z: float = Field(default=2.5, gt=0)
     anomaly_taker_delta_z: float = Field(default=2.5, gt=0)
+    # startup
+    startup_oi_expansion_threshold: float = Field(default=0.0)
+    startup_min_efficiency: float = Field(default=0.2, ge=0)
+    startup_max_retrace: float = Field(default=0.8, ge=0)
+    startup_min_evidence: int = Field(default=3, ge=1)
+    # false start veto
+    veto_rapid_retrace_threshold: float = Field(default=0.7, ge=0)
+    veto_absorption_flow_impact_threshold: float = Field(default=0.001, gt=0)
+    veto_absorption_delta_threshold: float = Field(default=10000.0, gt=0)
+    veto_crowding_percentile_threshold: float = Field(default=95.0, ge=0, le=100)
+    veto_one_bar_spike_window: str = Field(default="5s")
+    veto_one_bar_spike_retrace: float = Field(default=0.6, ge=0)
+    # continuation / exhaustion / withdrawal
+    continuation_min_oi_maintain: float = Field(default=0.0)
+    exhaustion_min_divergence_count: int = Field(default=2, ge=1)
+    withdrawal_min_evidence_count: int = Field(default=3, ge=1)
+    # light scanner (Stage1)
+    light_relative_volume_z: float = Field(default=2.5, gt=0)
+    light_trade_count_z: float = Field(default=2.5, gt=0)
+    light_oi_change_threshold: float = Field(default=0.02, ge=0)
 
 
 class AppConfigBundle(BaseModel):

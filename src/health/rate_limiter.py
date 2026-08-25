@@ -58,16 +58,23 @@ class RateLimiter:
         self,
         config: RateLimiterConfig | None = None,
         client: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.config = config or RateLimiterConfig()
         self.state = RateLimiterState(weight_limit=self.config.weight_limit_per_minute)
         self._client = client
         self._owns_client = client is None
+        self._proxy = proxy
         self._lock = asyncio.Lock()
+        # 权重预算每分钟重置：记录上次重置的 monotonic 时间
+        self._weight_window_start: float = time.monotonic()
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=10)
+            kwargs: dict = {"timeout": 10}
+            if self._proxy:
+                kwargs["proxy"] = self._proxy
+            self._client = httpx.AsyncClient(**kwargs)
             self._owns_client = True
         return self._client
 
@@ -166,6 +173,12 @@ class RateLimiter:
                 raise CircuitOpenError(
                     f"circuit open until {self.state.circuit_open_until:.0f}"
                 )
+
+            # 权重预算每分钟滚动重置
+            now_mono = time.monotonic()
+            if now_mono - self._weight_window_start >= 60.0:
+                self.state.weight_used = 0
+                self._weight_window_start = now_mono
 
             self.state.total_requests += 1
             client = await self._get_client()

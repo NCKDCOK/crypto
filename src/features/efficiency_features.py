@@ -1,10 +1,11 @@
 """Price Efficiency / Flow Impact / Retrace 特征。
 
-依据：ANALYSIS_MODEL.md §2.5
+依据：ANALYSIS_MODEL.md §2.5, 改造任务文档 §12
 - directional_efficiency = |P_end - P_start| / Σ|ΔP_i|  （窗口：30s / 1m）
 - flow_impact = signed_return / max(|net_taker_notional|, ε)
-  （窗口：30s / 1m；ε 默认 1.0 USDT）
 - retrace_ratio = 突破后回吐位移 / 突破位移
+- price_efficiency = abs(price_return) / normalized_aggressive_flow
+  （资金推动了多少价格；efficiency ↓ → absorption/distribution/exhaustion）
 
 AbsorptionCandidate = |delta| 大 AND flow_impact 极低。
 """
@@ -25,6 +26,7 @@ class EfficiencyFeatures:
     directional_efficiency: float | None
     flow_impact: float | None
     retrace_ratio: float | None
+    price_efficiency: float | None
 
 
 def compute_directional_efficiency(trades: Sequence[TradeEvent]) -> float | None:
@@ -129,13 +131,64 @@ def compute_retrace_ratio(
     return ratio
 
 
+def compute_price_efficiency(
+    trades: Sequence[TradeEvent],
+    baseline_notional: float | None = None,
+) -> float | None:
+    """Price Efficiency = abs(price_return) / normalized_aggressive_flow。
+
+    依据改造任务文档 §12：
+    - 防止除零；robust normalization；不同 symbol 不直接用绝对值比较。
+    - normalized_aggressive_flow = abs(net_taker_notional) / baseline_median(|notional|)
+      （相对自身历史基线归一化，跨 symbol 可比）
+    - 资金越来越大但价格推不动 → efficiency ↓ → 可能 absorption/distribution/exhaustion。
+
+    Returns:
+        price_efficiency，缺数据/除零保护返回 None。
+    """
+    if len(trades) < 2:
+        return None
+    sorted_trades = sorted(trades, key=lambda t: t.receive_time)
+    p_start = float(sorted_trades[0].price)
+    p_end = float(sorted_trades[-1].price)
+    if p_start == 0:
+        return None
+    price_return = (p_end - p_start) / p_start
+
+    buy_notional = sum(
+        float(t.quote_notional) for t in sorted_trades
+        if t.aggressor_side == AggressorSide.BUY
+    )
+    sell_notional = sum(
+        float(t.quote_notional) for t in sorted_trades
+        if t.aggressor_side == AggressorSide.SELL
+    )
+    net_taker = abs(buy_notional - sell_notional)
+
+    # 归一化：用基线中位数（若有），否则用窗口内单笔 notional 中位数
+    if baseline_notional and baseline_notional > 0:
+        norm = net_taker / baseline_notional
+    else:
+        # 退化：用窗口内成交 notional 中位数归一
+        notionals = sorted(float(t.quote_notional) for t in sorted_trades)
+        mid = notionals[len(notionals) // 2] if notionals else 0.0
+        norm = net_taker / mid if mid > 0 else 0.0
+
+    if norm <= 1e-12:
+        # 没有方向性资金推动 → 不定义效率
+        return None
+    return abs(price_return) / norm
+
+
 def compute_efficiency_features(
     trades: Sequence[TradeEvent],
     epsilon: float = 1.0,
+    baseline_notional: float | None = None,
 ) -> EfficiencyFeatures:
     """计算效率类特征。"""
     return EfficiencyFeatures(
         directional_efficiency=compute_directional_efficiency(trades),
         flow_impact=compute_flow_impact(trades, epsilon),
         retrace_ratio=compute_retrace_ratio(trades),
+        price_efficiency=compute_price_efficiency(trades, baseline_notional),
     )

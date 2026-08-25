@@ -22,6 +22,8 @@ from src.domain import OpenInterestSnapshot
 class OIFeatures:
     """OI 特征结果。"""
 
+    oi_contracts: float | None
+    oi_change_30s: float | None
     oi_change_1m: float | None
     oi_change_5m: float | None
     oi_change_15m: float | None
@@ -103,7 +105,14 @@ def compute_oi_features(
     Returns:
         OIFeatures，缺数据时对应字段为 None。
     """
+    oi_contracts: float | None = None
+    if snapshots:
+        sorted_snaps = sorted(snapshots, key=lambda s: s.receive_time)
+        oi_contracts = float(sorted_snaps[-1].open_interest)
+
     return OIFeatures(
+        oi_contracts=oi_contracts,
+        oi_change_30s=compute_oi_change(snapshots, 30_000, tolerance_ms),
         oi_change_1m=compute_oi_change(snapshots, 60_000, tolerance_ms),
         oi_change_5m=compute_oi_change(snapshots, 300_000, tolerance_ms),
         oi_change_15m=compute_oi_change(snapshots, 900_000, tolerance_ms),

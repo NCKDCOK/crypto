@@ -410,6 +410,7 @@ class TestEnums:
         assert {e.value for e in VetoType} == {
             "data_stale", "rapid_retrace", "oi_contraction", "delta_reversal",
             "no_acceptance", "low_efficiency_absorption", "crowding_extreme",
+            "one_bar_spike",
         }
 
     def test_veto_severity_values(self):
