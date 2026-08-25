@@ -81,6 +81,43 @@ class TestFeatureEngineSnapshot:
         snap = engine.compute_snapshot("BTCUSDT", 160000)
         assert snap.features["oi_change_1m"].value == 0.0
 
+    def test_oi_retention_at_least_2h(self):
+        """V1.3 §44：OI 快照保留 ≥2h，支持真实的 1h OI 变化计算。
+
+        19 个快照每隔 600_000 ms（10 分钟）写入，最新时刻计算时
+        cutoff = newest_receive_time − 7_200_000 ms → 保留索引 6..18 共 13 个。
+        """
+        engine = FeatureEngine()
+        base = 1_000_000_000
+        for i in range(19):
+            engine.add_oi_snapshot(_oi(base + i * 600_000, str(100.0 + i)))
+        snap = engine.compute_snapshot("BTCUSDT", base + 18 * 600_000)
+        assert snap.provenance["oi"]["snapshot_count"] == 13
+
+    def test_oi_1h_change_in_snapshot(self):
+        """V1.3 §43/§44：1h 绝对与百分比 OI 变化贯穿到 FeatureSnapshot。
+
+        回归：若保留窗口仍是旧的 1_000_000 ms（约 16.7 分钟），
+        3_600_000 ms 处的快照会被裁剪，1h 变化将不可用；≥2h 保留后可用。
+        """
+        engine = FeatureEngine()
+        engine.add_oi_snapshot(_oi(3_600_000, "100.0"))
+        engine.add_oi_snapshot(_oi(7_200_000, "130.0"))
+        snap = engine.compute_snapshot("BTCUSDT", 7_200_000)
+        assert snap.features["oi_change_1h"].available is True
+        assert snap.features["oi_change_1h"].value == 30.0
+        assert snap.features["oi_change_pct_1h"].available is True
+        assert snap.features["oi_change_pct_1h"].value == 30.0
+
+    def test_oi_change_pct_5m_in_snapshot(self):
+        """V1.3 §43：pct 字段随引擎输出（同刻计算 5m pct）。"""
+        engine = FeatureEngine()
+        engine.add_oi_snapshot(_oi(100_000, "100.0"))
+        engine.add_oi_snapshot(_oi(400_000, "120.0"))
+        snap = engine.compute_snapshot("BTCUSDT", 400_000)
+        assert snap.features["oi_change_pct_5m"].available is True
+        assert snap.features["oi_change_pct_5m"].value == 20.0
+
     def test_provenance_traceable(self):
         """provenance 记录来源 stream。"""
         engine = FeatureEngine()

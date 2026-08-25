@@ -1,5 +1,32 @@
 # CHANGELOG
 
+## [V1.3] — 状态监督 × 模拟验证 × UI 重构（P0 批次）
+
+依据《资金行为雷达_V1.3_状态监督_模拟验证_UI重构_更新计划》。
+本批次完成 P0 修复全部项：数据健康改为覆盖率口径、OI 单位/1h/pct、排名阈值与节奏、Trade Plan 合法状态门控、配置化落地；P1 状态监督 / P2 模拟验证 / P3 UI 重构按计划后续推进。
+
+### 配置层
+
+- **P0 配置化**：新增 `configs/{ranking,supervision,simulation,health_coverage}.yaml` + Pydantic 配置模型（`RankingConfig`/`SupervisionConfig`/`SimulationConfig`/`HealthCoverageConfig`），`AppConfigBundle` 默认装配，UI 刷新节奏与排名阈值统一从配置读取。
+
+### 数据层（数据健康）
+
+- **P0 Data Health 覆盖率（§46）**：新增 `src/health/coverage.py` — 覆盖率 = 健康（OK/WARN）符号×数据流对数 / 总数；≥90% 正常、70~90% 部分降级、<70% 异常；核心 aggTrade 数据流整体断线 → 严重异常（优先于覆盖率阈值）。单币 OI 延迟不再触发「数据异常」。新增 `GET /api/health/coverage` 端点（`/api/health` 行结构保持不变，兼容现有前端）。
+- **P0 OI 单位/1h/pct（§12）**：OI 变化统一为 1 小时口径、单位归一、pct 展示；OI momentum / 相对位置特征（`src/features/oi_features.py`、`flow_features.py`、`engine.py` 接线）。
+
+### 评分层
+
+- **P0 排名规则（§13）**：Top10 排除 COOLDOWN、不再强制凑满 10 个；正式榜仅 START_CONFIRMED/CONTINUATION，观察榜 ANOMALY/SUSPECTED_START；阈值（min_opportunity=70 / min_signal_confirmation=75 / min_data_confidence=85）与刷新节奏从 `RankingConfig` 读取。
+- **P0 Trade Plan 合法状态门控（§18-19）**：SLEEPING/COOLDOWN/ANOMALY 不生成；SUSPECTED_START/ACCUMULATION/RETEST_PENDING 仅候选预案（UI 标注「候选预案，尚未确认」）；START_CONFIRMED/CONTINUATION 正式计划。冻结版本化：每个符号首次正式冻结为 V1，新 Setup 升级为 V2 并生成新 trade_plan_id，冻结幂等、非 ACTIVE 不冻结、过期保留冻结值。
+
+### 测试
+
+- **P0 Tests**：覆盖率 18 用例（阈值边界 90/70、核心断线优先级、per-stream 分解、Runtime 集成：单 OI 流延迟 → 87.5% 部分降级）、OI 特征、排名阈值/节奏、Trade Plan 21 用例（合法状态门控 + 冻结版本化 + 过期）。全套 **585 passed**。
+
+**测试：585 passed，12 warnings（均为既有弃用告警）。仅影子/纸面信号，禁止自动交易。**
+
+---
+
 ## [V1.2] — 资金生命周期 × 市场背景 × 结构位置 × 置信度 × Trade Plan
 
 依据《资金行为雷达_V1.2》修改方案（25 执行步骤 + 用户追加持久化/恢复层）。

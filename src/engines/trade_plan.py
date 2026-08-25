@@ -1,4 +1,4 @@
-"""Trade Plan Engine — 分析计划（V1.2 §25）。
+"""Trade Plan Engine — 分析计划（V1.2 §25 + V1.3 §18/§19）。
 
 它只是分析计划，不是自动交易（AI_RULES 硬规则1）。
 
@@ -7,12 +7,56 @@ POC/VAH/VAL / VWAP / Swing / Failed Zone / ATR），不能由 AI 自由生成。
 §25.3 Invalidation：先确定什么位置被破坏后 Setup 不成立 → 1R。
 §25.4 TP：候选 2R / 3.2R / structure target，检查前方真实阻力。RR 不足输出「不建议追入」。
 §25.5 Trade Plan 冻结：START_CONFIRMED 或正式 Setup Push 时冻结 snapshot，禁止随价格漂移。
+
+V1.3 §18 状态限制（严格）：
+  - 正式 Trade Plan：START_CONFIRMED / CONTINUATION
+  - 只能生成候选预案：SUSPECTED_START（以及子阶段标签 ACCUMULATION / RETEST_PENDING，
+    方案A：子阶段/等待条件，非机器状态）→ UI 必须写「候选预案，尚未确认」
+  - 不生成正式计划：其余状态（SLEEPING / ANOMALY / COOLDOWN / EXHAUSTION /
+    WITHDRAWAL / REJECTED）
+
+V1.3 §19 版本冻结：
+  - 每次正式 Setup 创建：trade_plan_id / version / created_at / status
+  - 禁止每秒随价格重算并覆盖旧计划
+  - 后续变化只能：V1 → EXPIRED，V2 → NEW PLAN
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import uuid as _uuid
+from dataclasses import dataclass
 from typing import Any
+
+from src.domain.enums import State
+
+# ── §18 合法状态分级 ──
+# 正式 Trade Plan
+FORMAL_STATES: frozenset = frozenset({State.START_CONFIRMED, State.CONTINUATION})
+# 候选子阶段标签（方案A：子阶段/等待条件，仅监督列展示，非机器状态）
+CANDIDATE_SUB_STAGES: frozenset = frozenset({"ACCUMULATION", "RETEST_PENDING"})
+
+# ── §19 status 取值 ──
+STATUS_NOT_LEGAL = "NOT_LEGAL"      # 不生成正式计划（状态不在合法范围 / 数据不足）
+STATUS_CANDIDATE = "CANDIDATE"      # 候选预案，尚未确认
+STATUS_ACTIVE = "ACTIVE"            # 正式 Trade Plan（已冻结 / 可冻结）
+STATUS_EXPIRED = "EXPIRED"          # V-n 已过期 → V-n+1 NEW PLAN
+
+
+def plan_gate(state: State | str | None, sub_stage: str | None = None) -> str:
+    """§18 状态限制 → 返回 "formal" / "candidate" / "none"。
+
+    - state 为 None（旧调用未传状态）时按正式处理，保持向后兼容。
+    - 子阶段标签（ACCUMULATION / RETEST_PENDING）按候选预案处理。
+    """
+    if state is None:
+        return "formal"
+    if state in FORMAL_STATES:
+        return "formal"
+    if state == State.SUSPECTED_START or (
+        sub_stage and str(sub_stage).upper() in CANDIDATE_SUB_STAGES
+    ):
+        return "candidate"
+    return "none"
 
 
 @dataclass
@@ -33,6 +77,12 @@ class TradePlan:
     frozen: bool = False
     frozen_at_ms: int | None = None
     expired: bool = False
+    # V1.3 §18/§19
+    status: str = STATUS_NOT_LEGAL
+    trade_plan_id: str | None = None
+    version: int = 0
+    created_at: int | None = None
+    setup_snapshot_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -47,7 +97,38 @@ class TradePlan:
             "frozen": self.frozen,
             "frozen_at_ms": self.frozen_at_ms,
             "expired": self.expired,
+            "status": self.status,
+            "trade_plan_id": self.trade_plan_id,
+            "version": self.version,
+            "created_at": self.created_at,
+            "setup_snapshot_id": self.setup_snapshot_id,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "TradePlan":
+        """从 to_dict() 结果还原（§19 冻结快照原样恢复）。"""
+        return cls(
+            current_price=data.get("current_price"),
+            reference_entry_low=data.get("reference_entry_low"),
+            reference_entry_high=data.get("reference_entry_high"),
+            invalidation_price=data.get("invalidation_price"),
+            tp1=data.get("tp1"), tp2=data.get("tp2"), tp3=data.get("tp3"),
+            rr_tp1=data.get("rr_tp1"), rr_tp2=data.get("rr_tp2"),
+            rr_tp3=data.get("rr_tp3"),
+            chase_status=data.get("chase_status", "no_plan"),
+            plan_reason=data.get("plan_reason", ""),
+            frozen=data.get("frozen", False),
+            frozen_at_ms=data.get("frozen_at_ms"),
+            expired=data.get("expired", False),
+            status=data.get(
+                "status",
+                STATUS_ACTIVE if data.get("frozen") else STATUS_NOT_LEGAL,
+            ),
+            trade_plan_id=data.get("trade_plan_id"),
+            version=data.get("version", 0),
+            created_at=data.get("created_at"),
+            setup_snapshot_id=data.get("setup_snapshot_id"),
+        )
 
 
 class TradePlanEngine:
@@ -66,6 +147,8 @@ class TradePlanEngine:
         self.tp1_r = tp1_r
         self.tp2_r = tp2_r
         self.tp3_structure = tp3_structure
+        # §19：每个 symbol 已冻结的最大版本（V1 → EXPIRED → V2 → ...）
+        self._versions: dict[str, int] = {}
 
     def compute(
         self,
@@ -75,14 +158,28 @@ class TradePlanEngine:
         structure=None,
         volume_profile=None,
         atr: float | None = None,
+        state: State | str | None = None,
+        sub_stage: str | None = None,
     ) -> TradePlan:
-        """生成交易计划。
+        """生成交易计划（V1.3 §18 状态限制）。
 
         Entry 来自结构（support/resistance/breakout_level/retest_zone/poc/vwap）。
+        state / sub_stage 传入后按 §18 分级：
+        - 不合法状态 → status=NOT_LEGAL，不生成正式计划
+        - 候选（SUSPECTED_START / ACCUMULATION / RETEST_PENDING）→ status=CANDIDATE
+        - 正式（START_CONFIRMED / CONTINUATION）→ status=ACTIVE
         """
         if current_price is None or direction is None:
             return TradePlan(None, None, None, None, None, None, None, None, None, None,
-                             "no_plan", "数据不足，无法生成计划")
+                             "no_plan", "数据不足，无法生成计划", status=STATUS_NOT_LEGAL)
+
+        gate = plan_gate(state, sub_stage)
+        if gate == "none":
+            state_text = state.value if isinstance(state, State) else str(state)
+            return TradePlan(None, None, None, None, None, None, None, None, None, None,
+                             "no_plan",
+                             f"当前状态 {state_text} 不在合法生成范围，不生成交易计划（§18）",
+                             status=STATUS_NOT_LEGAL)
 
         sign = 1.0 if direction == "LONG" else -1.0
         # ── Entry Zone（来自结构）──
@@ -180,6 +277,10 @@ class TradePlanEngine:
         else:
             plan_reason = self._build_reason(direction, entry_ref, invalidation, tp1, tp2, rr1)
 
+        status = STATUS_ACTIVE if gate == "formal" else STATUS_CANDIDATE
+        if status == STATUS_CANDIDATE:
+            plan_reason = f"候选预案，尚未确认；{plan_reason}" if plan_reason else "候选预案，尚未确认"
+
         return TradePlan(
             current_price=current_price,
             reference_entry_low=entry_low,
@@ -189,6 +290,7 @@ class TradePlanEngine:
             rr_tp1=rr1, rr_tp2=rr2, rr_tp3=rr3,
             chase_status=chase_status,
             plan_reason=plan_reason,
+            status=status,
         )
 
     def _build_reason(self, direction, entry, invalidation, tp1, tp2, rr1):
@@ -207,8 +309,28 @@ class TradePlanEngine:
             parts.append(f"R:R {rr1:.1f}")
         return "，".join(parts)
 
-    def freeze(self, plan: TradePlan, now_ms: int) -> TradePlan:
-        """冻结 Trade Plan snapshot（§25.5，START_CONFIRMED 时调用）。"""
+    def freeze(self, plan: TradePlan, now_ms: int, *, symbol: str | None = None) -> TradePlan:
+        """冻结 Trade Plan snapshot（§19：每次正式 Setup 创建，禁止覆盖旧计划）。
+
+        只有 status=ACTIVE 的正式计划可冻结；已冻结计划原样返回。
+        同一 symbol 每次新 Setup 版本 +1（V1 → EXPIRED → V2 → NEW PLAN）。
+        """
+        if plan.status != STATUS_ACTIVE or (plan.frozen and plan.trade_plan_id):
+            return plan
+        if not plan.trade_plan_id:
+            plan.trade_plan_id = _uuid.uuid4().hex
+        if symbol:
+            plan.version = self._versions.get(symbol, 0) + 1
+            self._versions[symbol] = plan.version
+        else:
+            plan.version = (plan.version or 0) + 1
+        plan.created_at = now_ms
         plan.frozen = True
         plan.frozen_at_ms = now_ms
+        return plan
+
+    def expire(self, plan: TradePlan, now_ms: int) -> TradePlan:
+        """§19：V1 → EXPIRED（旧 Setup 失效，等待 V2 NEW PLAN）。"""
+        plan.status = STATUS_EXPIRED
+        plan.expired = True
         return plan

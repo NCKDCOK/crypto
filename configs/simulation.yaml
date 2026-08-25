@@ -1,0 +1,9 @@
+# 模拟验证配置（V1.3 §62）
+# 只允许 Paper / Shadow Trading：禁止真实下单、禁止私有 API Key 交易权限（AI_RULES 硬规则1）。
+recommendation_expire_minutes: 60.0   # WATCHING 推荐过期时长
+require_revalidation: true           # 进入关注区后必须二次验证才入场
+static_track_max_hours: 24.0         # 静态计划结果最长后台跟踪时长（§32）
+revalidation_stale_max_s: 30.0       # 数据超过此秒数视为 stale → 取消入场
+withdrawal_confirm_s: 30.0           # 撤离信号需连续确认此秒数
+direction_flip_confirm_s: 20.0       # 方向翻转需连续确认此秒数
+entry_zone_grace_s: 10.0             # 进入关注区后未通过验证的宽限期

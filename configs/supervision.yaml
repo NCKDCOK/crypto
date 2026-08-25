@@ -1,0 +1,15 @@
+# 监督池频率配置（V1.3 §6.2-§6.8, §62）
+# 后台 feature 计算仍保持 1~2s；此处决定 state-aware 监督规则的执行节奏。
+normal_interval_sec: 20.0       # NORMAL 池 15~30s
+anomaly_interval_sec: 7.0       # ANOMALY 池 5~10s
+watch_interval_sec: 2.0         # WATCH 池 1~5s
+confirmed_interval_sec: 2.0     # CONFIRMED 池
+continuation_interval_sec: 3.0  # CONTINUATION 池
+risk_interval_sec: 2.0          # RISK 池
+exit_interval_sec: 2.0          # EXIT 池
+archive_interval_sec: 30.0      # ARCHIVE 池
+
+# 状态滞回（V1.3 §10）：降级需要连续 N 次失去核心条件（明确 Veto 除外）
+hysteresis_downgrade_streak: 3
+# 驻留保护：进入新池后至少驻留此秒数才允许降级转移
+min_pool_dwell_s: 60.0

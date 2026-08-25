@@ -130,3 +130,123 @@ class TestSystemConclusion:
         top10 = [{"symbol": "BTCUSDT", "state": "ANOMALY"}]
         conclusion = generate_system_conclusion(top10, 3)
         assert "异动" in conclusion
+
+
+# ── V1.3 §13 严格模式 ────────────────────────────────────────────────
+# 正式 Top Opportunity：state ∈ {START_CONFIRMED, CONTINUATION}、
+# opportunity ≥ 70、signal_confirmation ≥ 75、data_confidence ≥ 85、
+# 上限 10 且不足不强制凑满。严格过滤均为 rank_symbols 可选参数，
+# 默认（不传）保持 V1.1/V1.2 宽松行为，保证旧 fixture 兼容。
+
+
+def _sym(name: str, state: str, opportunity: float,
+         confirmation: float, confidence: float) -> dict:
+    return {
+        "symbol": name,
+        "state": state,
+        "opportunity_score": opportunity,
+        "signal_confirmation": confirmation,
+        "data_confidence": confidence,
+        "confidence_state": "CONFIDENT",
+        "score_available": True,
+        "stale_flag": 0,
+    }
+
+
+class TestV13RankSymbolsStrict:
+    """V1.3 §13 严格门槛（rank_symbols 可选参数，向后兼容）。"""
+
+    def test_v13_state_filter_excludes_others(self):
+        """allowed_states 传入时，COOLDOWN/ANOMALY 高分也被排除。"""
+        symbols = [
+            _sym("COOLUSDT", "COOLDOWN", 95, 95, 95),
+            _sym("ANOUSDT", "ANOMALY", 90, 90, 90),
+            _sym("OKUSDT", "START_CONFIRMED", 80, 85, 90),
+        ]
+        result = rank_symbols(
+            symbols, top_n=10,
+            allowed_states=["START_CONFIRMED", "CONTINUATION"],
+        )
+        assert [s["symbol"] for s in result] == ["OKUSDT"]
+
+    def test_v13_state_filter_keeps_allowed(self):
+        symbols = [
+            _sym("AUSDT", "START_CONFIRMED", 80, 85, 90),
+            _sym("BUSDT", "CONTINUATION", 75, 80, 88),
+            _sym("CUSDT", "SUSPECTED_START", 99, 99, 99),
+        ]
+        result = rank_symbols(
+            symbols, top_n=10,
+            allowed_states=["START_CONFIRMED", "CONTINUATION"],
+        )
+        assert [s["symbol"] for s in result] == ["AUSDT", "BUSDT"]
+
+    def test_v13_opportunity_threshold(self):
+        """min_opportunity=70：机会分 60 的即使高确认也不进。"""
+        symbols = [
+            _sym("LOWUSDT", "START_CONFIRMED", 60, 90, 90),
+            _sym("OKUSDT", "START_CONFIRMED", 72, 90, 90),
+        ]
+        result = rank_symbols(symbols, top_n=10, min_opportunity=70.0)
+        assert [s["symbol"] for s in result] == ["OKUSDT"]
+
+    def test_v13_confirmation_threshold(self):
+        """min_signal_confirmation=75：确认 70 的不进。"""
+        symbols = [
+            _sym("LOWUSDT", "START_CONFIRMED", 90, 70, 90),
+            _sym("OKUSDT", "START_CONFIRMED", 90, 76, 90),
+        ]
+        result = rank_symbols(
+            symbols, top_n=10, min_signal_confirmation=75.0)
+        assert [s["symbol"] for s in result] == ["OKUSDT"]
+
+    def test_v13_data_confidence_threshold(self):
+        """min_data_confidence=85：可信 80 的不进。"""
+        symbols = [
+            _sym("LOWUSDT", "START_CONFIRMED", 90, 90, 80),
+            _sym("OKUSDT", "START_CONFIRMED", 90, 90, 86),
+        ]
+        result = rank_symbols(symbols, top_n=10, min_data_confidence=85.0)
+        assert [s["symbol"] for s in result] == ["OKUSDT"]
+
+    def test_v13_combined_strict_mode(self):
+        """完整严格路径（runtime.get_top10 同款参数）。"""
+        symbols = [
+            _sym("COOLUSDT", "COOLDOWN", 95, 95, 95),   # 状态排除
+            _sym("LOWUSDT", "START_CONFIRMED", 60, 99, 99),  # 机会不足
+            _sym("MEHUSDT", "START_CONFIRMED", 90, 70, 99),  # 确认不足
+            _sym("POORUSDT", "START_CONFIRMED", 90, 90, 80),  # 可信不足
+            _sym("GOODUSDT", "START_CONFIRMED", 80, 85, 90),  # 唯一合格
+            _sym("RUNUSDT", "CONTINUATION", 72, 76, 88),
+        ]
+        result = rank_symbols(
+            symbols, top_n=10,
+            min_opportunity=70.0,
+            min_signal_confirmation=75.0,
+            min_data_confidence=85.0,
+            allowed_states=["START_CONFIRMED", "CONTINUATION"],
+        )
+        # 排序按 ranking score：GOOD 80*.85*.90=61.2 > RUN 72*.76*.88=48.15
+        assert [s["symbol"] for s in result] == ["GOODUSDT", "RUNUSDT"]
+
+    def test_v13_no_forced_10(self):
+        """合格不足 10 个时，不强制凑满。"""
+        symbols = [
+            _sym("AUSDT", "START_CONFIRMED", 75, 80, 86),
+            _sym("BUSDT", "CONTINUATION", 71, 76, 85),
+        ]
+        result = rank_symbols(symbols, top_n=10,
+                              min_opportunity=70.0,
+                              min_signal_confirmation=75.0,
+                              min_data_confidence=85.0,
+                              allowed_states=["START_CONFIRMED", "CONTINUATION"])
+        assert len(result) == 2
+
+    def test_v13_permissive_default_backward_compat(self):
+        """默认（不传过滤参数）仍保留旧行为：次阈值 C 也能上榜。"""
+        symbols = [
+            _sym("AUSDT", "START_CONFIRMED", 90, 90, 90),
+            _sym("CUSDT", "ANOMALY", 85, 50, 50),  # 次阈值，但默认仍上榜
+        ]
+        result = rank_symbols(symbols, top_n=10)
+        assert len(result) == 2

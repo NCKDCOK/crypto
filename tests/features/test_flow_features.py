@@ -105,3 +105,38 @@ class TestComputeFlowFeatures:
         result = compute_flow_features("BTCUSDT", [], tracker, 1000)
         assert result.taker_delta is None
         assert result.cvd == 0.0
+
+
+class TestTakerBS:
+    """V1.3 §45：Taker B/S = 主动买名义额 / 主动卖名义额。"""
+
+    def _result(self, trades):
+        tracker = CVDTracker()
+        return compute_flow_features("BTCUSDT", trades, tracker, 2000)
+
+    def test_bs_ratio(self):
+        """buy=15000, sell=5000 → B/S = 3.0。"""
+        trades = [
+            _trade("BTCUSDT", 1, "50000", "0.1", AggressorSide.BUY),
+            _trade("BTCUSDT", 2, "50000", "0.1", AggressorSide.SELL),
+            _trade("BTCUSDT", 3, "50000", "0.2", AggressorSide.BUY),
+        ]
+        result = self._result(trades)
+        assert result.taker_bs == 3.0
+
+    def test_bs_buy_only_none(self):
+        """只有主动买（sell==0）→ None（避免除零），delta_ratio 仍为 1.0。"""
+        trades = [_trade("BTCUSDT", 1, "50000", "0.1", AggressorSide.BUY)]
+        result = self._result(trades)
+        assert result.taker_bs is None
+        assert result.delta_ratio == 1.0
+
+    def test_bs_all_sell_zero(self):
+        """buy==0, sell>0 → B/S = 0.0。"""
+        trades = [_trade("BTCUSDT", 1, "50000", "0.1", AggressorSide.SELL)]
+        result = self._result(trades)
+        assert result.taker_bs == 0.0
+        assert result.delta_ratio == -1.0
+
+    def test_bs_empty(self):
+        assert self._result([]).taker_bs is None

@@ -49,6 +49,7 @@ from src.domain import (
 )
 from src.features.engine import FeatureEngine, WINDOW_BY_MS
 from src.health.confidence import ConfidenceTracker
+from src.health.coverage import compute_coverage
 from src.health.freshness_watchdog import (
     FreshnessBudget,
     FreshnessWatchdog,
@@ -84,7 +85,7 @@ from src.engines.location import LocationEngine
 from src.engines.trend import TrendEngine
 from src.engines.pump_risk import PumpRiskEngine
 from src.engines.breakout_lifecycle import BreakoutLifecycleEngine
-from src.engines.trade_plan import TradePlanEngine
+from src.engines.trade_plan import STATUS_ACTIVE, TradePlan, TradePlanEngine
 
 logger = logging.getLogger(__name__)
 
@@ -1243,19 +1244,30 @@ class MarketRadarRuntime:
         st.trend_score = trend.trend_score
         st.trend_label = trend.label
 
-        # Trade Plan（START_CONFIRMED 时冻结）
+        # Trade Plan（V1.3 §18 状态限制 + §19 版本冻结）
         plan = self.trade_plan_engine.compute(
             current_price or None,
             st.direction.value if st.direction else None,
             structure=struct, volume_profile=vp, atr=struct.atr,
+            state=st.state,
+            sub_stage=st.setup_type,
         )
-        if st.state == State.START_CONFIRMED and not st.trade_plan.get("frozen"):
-            self.trade_plan_engine.freeze(plan, now)
+        prev_plan = st.trade_plan or {}
+        prev_active = prev_plan.get("frozen") and prev_plan.get("status") == STATUS_ACTIVE
+        if prev_active and plan.status == STATUS_ACTIVE:
+            # 同一正式 Setup 持续：保留冻结快照原样，禁止每秒随价格重算覆盖（§19）
+            st.trade_plan = prev_plan
+        elif plan.status == STATUS_ACTIVE:
+            # 新正式 Setup：旧版 V-n → EXPIRED，冻结 V-(n+1) NEW PLAN（§19）
+            self.trade_plan_engine.freeze(plan, now, symbol=symbol)
+            self.repository.expire_trade_plans(symbol, now)
             self.repository.save_trade_plan(symbol, now, plan.to_dict())
-        if st.trade_plan.get("frozen") and not plan.frozen:
-            plan.frozen = True
-            plan.frozen_at_ms = st.trade_plan.get("frozen_at_ms")
-        st.trade_plan = plan.to_dict()
+            st.trade_plan = plan.to_dict()
+        else:
+            # 离开正式范围：旧计划 → EXPIRED（DB 标记），当前展示最新状态判定
+            if prev_plan.get("frozen"):
+                self.repository.expire_trade_plans(symbol, now)
+            st.trade_plan = plan.to_dict()
 
         # 评分（注入 pump_risk）
         score_bd = self.score_engine.compute(
@@ -1485,6 +1497,27 @@ class MarketRadarRuntime:
             result.append(row)
         return result
 
+    def get_health_coverage(self) -> dict[str, Any]:
+        """数据健康覆盖率（V1.3 §46）。
+
+        覆盖率 = OK/WARN 的 symbol×stream 配对 / 全部配对。
+        只因为某一个币 OI 延迟不再导致"数据异常"，而是按覆盖率分级；
+        核心数据源（aggTrade）整体断线 → 严重异常（无论覆盖率）。
+        """
+        hc = self.cfg.health_coverage
+        pairs: list[tuple[str, str | HealthLevel]] = []
+        for sym in self.deep_scanner.symbols:
+            for prefix in (STREAM_AGGTRADE, STREAM_KLINE, STREAM_OI, STREAM_FUNDING):
+                hs = self.watchdog.check_health(f"{prefix}:{sym}")
+                pairs.append((f"{prefix}:{sym}", hs.status))
+        result = compute_coverage(
+            pairs,
+            ok_min=hc.ok_min,
+            degraded_min=hc.degraded_min,
+            critical_stream_prefix=hc.critical_stream_prefix,
+        )
+        return result.to_dict()
+
     def get_signal_history(self, symbol: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         events = self.transition_history
         if symbol:
@@ -1548,11 +1581,22 @@ class MarketRadarRuntime:
         """Top10 排名 — 按 RankingScore 排序 + 排名滞回（V1.2 §6.4）。
 
         V1.2：非 LIVE 模式（RECOVERY/WARMUP）不产出强确认 Top10。
+        V1.3 §13：正式 Top 机会应用严格阈值（机会≥70 / 信号确认≥75 /
+        数据可信≥85 / 上限 10 / 仅 START_CONFIRMED、CONTINUATION），
+        COOLDOWN 等状态天然被过滤，不足 10 个不强制凑满。
         """
         if not self.is_live:
             return []
+        rk = self.cfg.ranking
         radar = self.get_radar()
-        ranked = rank_symbols(radar, top_n=10)
+        ranked = rank_symbols(
+            radar,
+            top_n=rk.max_items,
+            min_opportunity=rk.min_opportunity,
+            min_signal_confirmation=rk.min_signal_confirmation,
+            min_data_confidence=rk.min_data_confidence,
+            allowed_states=rk.allowed_states,
+        )
         now_ms = self.clock.now_ms()
         return self.ranking_hysteresis.update(ranked, now_ms)
 

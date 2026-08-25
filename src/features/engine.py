@@ -150,8 +150,8 @@ class FeatureEngine:
     def add_oi_snapshot(self, snap: OpenInterestSnapshot) -> None:
         state = self.get_state(snap.symbol)
         state.oi_snapshots.append(snap)
-        # 保留最近 5m + 容差的快照（足够算 30s/1m/5m/15m）
-        cutoff = snap.receive_time - 1_000_000
+        # V1.3 §44：保留 ≥2h 快照（支持真实 1h OI 变化）
+        cutoff = snap.receive_time - 7_200_000
         state.oi_snapshots = [s for s in state.oi_snapshots if s.receive_time >= cutoff]
 
     def add_funding_snapshot(self, snap: FundingRateSnapshot) -> None:
@@ -345,6 +345,13 @@ class FeatureEngine:
         features["oi_change_30s"] = _fv(oi_feats.oi_change_30s, "30s")
         features["oi_change_1m"] = _fv(oi_feats.oi_change_1m, "1m")
         features["oi_change_5m"] = _fv(oi_feats.oi_change_5m, "5m")
+        features["oi_change_15m"] = _fv(oi_feats.oi_change_15m, "15m")
+        features["oi_change_1h"] = _fv(oi_feats.oi_change_1h, "1h")
+        # V1.3 §43：百分比变化（用户默认展示，禁止与绝对变化混用）
+        features["oi_change_pct_1m"] = _fv(oi_feats.oi_change_pct_1m, "1m")
+        features["oi_change_pct_5m"] = _fv(oi_feats.oi_change_pct_5m, "5m")
+        features["oi_change_pct_15m"] = _fv(oi_feats.oi_change_pct_15m, "15m")
+        features["oi_change_pct_1h"] = _fv(oi_feats.oi_change_pct_1h, "1h")
         features["oi_velocity"] = _fv(oi_feats.oi_velocity, None)
         features["oi_acceleration"] = _fv(oi_feats.oi_accel, None)
         provenance["oi"] = {

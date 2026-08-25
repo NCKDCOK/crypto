@@ -32,6 +32,8 @@ class FlowFeatures:
     cvd_slope: float | None
     cvd_slope_z: float | None
     cvd_accel_z: float | None
+    # V1.3 §45：Taker B/S = 主动买名义额 / 主动卖名义额（sell==0 → None）
+    taker_bs: float | None = None
 
 
 def compute_taker_delta(trades: Sequence[TradeEvent]) -> float | None:
@@ -191,6 +193,11 @@ def compute_flow_features(
     if buy_vol is not None and sell_vol is not None and (buy_vol + sell_vol) > 0:
         delta_ratio = (buy_vol - sell_vol) / (buy_vol + sell_vol)
 
+    # V1.3 §45：Taker B/S = buy / sell，sell==0（全买无卖）→ None
+    taker_bs: float | None = None
+    if buy_vol is not None and sell_vol is not None and sell_vol > 0:
+        taker_bs = buy_vol / sell_vol
+
     return FlowFeatures(
         taker_delta=delta,
         taker_buy_volume=buy_vol,
@@ -200,4 +207,5 @@ def compute_flow_features(
         cvd_slope=slope,
         cvd_slope_z=slope_z,
         cvd_accel_z=accel_z,
+        taker_bs=taker_bs,
     )

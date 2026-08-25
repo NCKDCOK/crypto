@@ -20,7 +20,13 @@ from src.domain import OpenInterestSnapshot
 
 @dataclass
 class OIFeatures:
-    """OI 特征结果。"""
+    """OI 特征结果。
+
+    V1.3 §43：绝对变化与百分比变化区分，禁止混用：
+    - oi_change_abs_* = current - asof（基础资产数量差）
+    - oi_change_pct_* = (current - asof) / asof * 100（百分比）
+    用户默认展示百分比（例如 "OI 5m +2.3%"）；绝对变化不得加 `%`。
+    """
 
     oi_contracts: float | None
     oi_change_30s: float | None
@@ -29,16 +35,22 @@ class OIFeatures:
     oi_change_15m: float | None
     oi_velocity: float | None
     oi_accel: float | None
+    # V1.3 §43：1h 绝对变化 + 各窗口百分比变化
+    oi_change_1h: float | None = None
+    oi_change_pct_1m: float | None = None
+    oi_change_pct_5m: float | None = None
+    oi_change_pct_15m: float | None = None
+    oi_change_pct_1h: float | None = None
 
 
-def compute_oi_change(
+def _asof_snapshot(
     snapshots: Sequence[OpenInterestSnapshot],
     lookback_ms: int,
     tolerance_ms: int,
-) -> float | None:
-    """计算 OI 变化 = current - asof。
+) -> tuple[OpenInterestSnapshot, OpenInterestSnapshot] | None:
+    """返回 (current, asof) 快照对。
 
-    在容差范围内找最近快照，容差外返回 None。
+    在容差范围内找 as-of 快照（时间必须早于 current），容差外返回 None。
     """
     if not snapshots:
         return None
@@ -57,7 +69,41 @@ def compute_oi_change(
         return None
 
     asof = min(candidates, key=lambda s: abs(s.receive_time - target_time))
+    return current, asof
+
+
+def compute_oi_change(
+    snapshots: Sequence[OpenInterestSnapshot],
+    lookback_ms: int,
+    tolerance_ms: int,
+) -> float | None:
+    """计算 OI 绝对变化 = current - asof（基础资产数量）。
+
+    在容差范围内找最近快照，容差外返回 None。
+    """
+    pair = _asof_snapshot(snapshots, lookback_ms, tolerance_ms)
+    if pair is None:
+        return None
+    current, asof = pair
     return float(current.open_interest - asof.open_interest)
+
+
+def compute_oi_change_pct(
+    snapshots: Sequence[OpenInterestSnapshot],
+    lookback_ms: int,
+    tolerance_ms: int,
+) -> float | None:
+    """计算 OI 百分比变化 = (current - asof) / asof * 100。
+
+    asof.open_interest == 0（无法定义百分比）→ None。
+    """
+    pair = _asof_snapshot(snapshots, lookback_ms, tolerance_ms)
+    if pair is None:
+        return None
+    current, asof = pair
+    if asof.open_interest == 0:
+        return None
+    return float(current.open_interest - asof.open_interest) / float(asof.open_interest) * 100.0
 
 
 def compute_oi_velocity(snapshots: Sequence[OpenInterestSnapshot]) -> float | None:
@@ -118,4 +164,10 @@ def compute_oi_features(
         oi_change_15m=compute_oi_change(snapshots, 900_000, tolerance_ms),
         oi_velocity=compute_oi_velocity(snapshots),
         oi_accel=compute_oi_accel(snapshots),
+        # V1.3 §43：1h 绝对变化 + 各窗口百分比变化
+        oi_change_1h=compute_oi_change(snapshots, 3_600_000, tolerance_ms),
+        oi_change_pct_1m=compute_oi_change_pct(snapshots, 60_000, tolerance_ms),
+        oi_change_pct_5m=compute_oi_change_pct(snapshots, 300_000, tolerance_ms),
+        oi_change_pct_15m=compute_oi_change_pct(snapshots, 900_000, tolerance_ms),
+        oi_change_pct_1h=compute_oi_change_pct(snapshots, 3_600_000, tolerance_ms),
     )

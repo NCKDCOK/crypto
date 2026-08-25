@@ -31,6 +31,11 @@ def compute_ranking_score(
 def rank_symbols(
     symbols: list[dict[str, Any]],
     top_n: int = 10,
+    *,
+    min_opportunity: float | None = None,
+    min_signal_confirmation: float | None = None,
+    min_data_confidence: float | None = None,
+    allowed_states: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """对 symbol 列表按 RankingScore 排名，返回 Top N。
 
@@ -39,6 +44,15 @@ def rank_symbols(
     - 评分不可用 (score_available == False) → 不进入 Top10
     - stale (stale_flag == 1) → 不进入 Top10
     - data_confidence / signal_confirmation 缺失 → 不进入 Top10
+
+    V1.3 §13 严格阈值（可选参数，缺省禁用，保持 V1.1/V1.2 调用兼容）：
+    - min_opportunity / min_signal_confirmation / min_data_confidence 提供时，
+      低于阈值的标的被过滤
+    - allowed_states 提供时，state 不在名单中的标的被过滤
+      （正式 Top 机会仅允许 START_CONFIRMED / CONTINUATION，由 runtime 传入）
+
+    内部使用：symbols 里的 dict 会被追加 "ranking_score" 键后原样返回，
+    因此本函数会修改传入 dict（浅拷贝后追加）。
     """
     eligible = []
     for s in symbols:
@@ -52,6 +66,9 @@ def rank_symbols(
         # 排除 stale
         if s.get("stale_flag", 0) == 1:
             continue
+        # V1.3: 状态过滤（可选）
+        if allowed_states is not None and s.get("state") not in allowed_states:
+            continue
 
         opp = s.get("opportunity_score", 0) or 0
         sc = s.get("signal_confirmation")
@@ -62,6 +79,14 @@ def rank_symbols(
         if sc is None:
             sc = dc  # 信号确认缺失时退化为数据可信（保守）
         if dc is None or sc is None:
+            continue
+
+        # V1.3: 分项阈值（可选）
+        if min_opportunity is not None and opp < min_opportunity:
+            continue
+        if min_signal_confirmation is not None and sc < min_signal_confirmation:
+            continue
+        if min_data_confidence is not None and dc < min_data_confidence:
             continue
 
         ranking = compute_ranking_score(opp, sc, dc)

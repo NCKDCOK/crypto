@@ -1,4 +1,4 @@
-"""OI 特征测试 — 单位、缺数据、oi_change=0。"""
+"""OI 特征测试 — 单位、缺数据、oi_change=0、V1.3 pct/1h。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from src.domain import OpenInterestSnapshot
 from src.features.oi_features import (
     compute_oi_accel,
     compute_oi_change,
+    compute_oi_change_pct,
     compute_oi_features,
     compute_oi_velocity,
 )
@@ -50,6 +51,41 @@ class TestComputeOIChange:
         assert compute_oi_change([], 60_000, 15_000) is None
 
 
+class TestComputeOIChangePct:
+    """V1.3 §43：百分比变化 = (current-asof)/asof*100。"""
+
+    def test_basic_pct(self):
+        """100 → 120 over 1m → +20%。"""
+        snaps = [_oi("BTCUSDT", 100000, "100.0"), _oi("BTCUSDT", 160000, "120.0")]
+        pct = compute_oi_change_pct(snaps, 60_000, 15_000)
+        assert pct == 20.0
+
+    def test_flat_zero_pct(self):
+        snaps = [_oi("BTCUSDT", 100000, "100.0"), _oi("BTCUSDT", 160000, "100.0")]
+        pct = compute_oi_change_pct(snaps, 60_000, 15_000)
+        assert pct == 0.0
+
+    def test_pct_1h(self):
+        """V1.3 §43：1h 百分比（依赖 ≥2h 留存窗口）。"""
+        snaps = [
+            _oi("BTCUSDT", 3_600_000, "100.0"),
+            _oi("BTCUSDT", 7_200_000, "130.0"),
+        ]
+        pct = compute_oi_change_pct(snaps, 3_600_000, 15_000)
+        assert pct == 30.0
+
+    def test_zero_base_unavailable(self):
+        """asof == 0 → 无法定义百分比 → None（绝对变化仍可为正）。"""
+        snaps = [_oi("BTCUSDT", 100000, "0"), _oi("BTCUSDT", 160000, "120.0")]
+        pct = compute_oi_change_pct(snaps, 60_000, 15_000)
+        assert pct is None
+        # 绝对变化不受影响
+        assert compute_oi_change(snaps, 60_000, 15_000) == 120.0
+
+    def test_empty(self):
+        assert compute_oi_change_pct([], 60_000, 15_000) is None
+
+
 class TestComputeOIVelocity:
     def test_basic(self):
         snaps = [_oi("BTCUSDT", 100000, "100.0"), _oi("BTCUSDT", 160000, "120.0")]
@@ -87,6 +123,12 @@ class TestComputeOIFeatures:
         assert result.oi_change_5m is None
         assert result.oi_velocity is None
         assert result.oi_accel is None
+        # V1.3 新增字段
+        assert result.oi_change_1h is None
+        assert result.oi_change_pct_1m is None
+        assert result.oi_change_pct_5m is None
+        assert result.oi_change_pct_15m is None
+        assert result.oi_change_pct_1h is None
 
     def test_oi_unit_is_base_asset(self):
         """OI 单位 = 基础资产数量。"""
@@ -94,3 +136,23 @@ class TestComputeOIFeatures:
         result = compute_oi_features(snaps)
         # 不变 → change=0
         assert result.oi_change_1m == 0.0
+
+    def test_v13_pct_and_1h_fields(self):
+        """V1.3 §43：1h 绝对变化 + 各窗口百分比变化。"""
+        snaps = [
+            _oi("BTCUSDT", 100000, "100.0"),
+            _oi("BTCUSDT", 400000, "110.0"),   # 5m asof
+            _oi("BTCUSDT", 1600000, "115.0"),  # 15m asof
+            _oi("BTCUSDT", 3700000, "130.0"),  # 1h asof
+            _oi("BTCUSDT", 7300000, "143.0"),  # current
+        ]
+        result = compute_oi_features(snaps)
+        # 1m：target=7240000，无候选 → None（演示缺数据不伪造）
+        assert result.oi_change_1m is None
+        # 5m：target=7000000，最近 3700000 差 3300000s → None
+        assert result.oi_change_5m is None
+        # 15m：target=5800000，最近 3700000 差 2100000s → None
+        assert result.oi_change_15m is None
+        # 1h：target=3700000 → 精确匹配 → abs=+13.0, pct=+10.0%
+        assert result.oi_change_1h == 13.0
+        assert result.oi_change_pct_1h == 10.0

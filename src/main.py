@@ -80,6 +80,25 @@ async def get_health():
     return runtime.get_health()
 
 
+@app.get("/api/health/coverage")
+async def get_health_coverage():
+    """数据健康覆盖率（V1.3 §46）— 首页"数据健康 92%" 的数据源。
+
+    独立于 /api/health 的明细行（app.js State.healthData 保持数组协议不变）。
+    """
+    if runtime is None:
+        return {
+            "coverage_pct": 0.0,
+            "healthy_pairs": 0,
+            "total_pairs": 0,
+            "level": "anomaly",
+            "level_label": "异常",
+            "critical_stream_down": False,
+            "per_stream": {},
+        }
+    return runtime.get_health_coverage()
+
+
 @app.get("/api/symbol/{symbol}")
 async def get_symbol_detail(symbol: str):
     if runtime is None:

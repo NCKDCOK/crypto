@@ -235,6 +235,92 @@ class ScoringConfig(BaseModel):
     sc_strong_confirm_min_dc: float = Field(default=70.0, ge=0, le=100, description="强确认所需最低 data_confidence")
 
 
+class HealthCoverageConfig(BaseModel):
+    """Data Health 覆盖率阈值（V1.3 §46）。
+
+    覆盖率 = 健康（OK/WARN）的 symbol×stream 配对占全部注册配对的比例。
+    整体断线 = 全部 symbol 的关键流（aggTrade）同时 FAIL。
+
+    - >= ok_min → 正常
+    - >= degraded_min → 部分降级
+    - < degraded_min → 异常
+    - 核心数据源整体断线 → 严重异常（无论覆盖率）
+    """
+
+    ok_min: float = Field(default=90.0, ge=0, le=100)
+    degraded_min: float = Field(default=70.0, ge=0, le=100)
+    critical_stream_prefix: str = Field(default="aggTrade", description="判断整体断线的核心流前缀")
+
+
+class RankingConfig(BaseModel):
+    """Top Opportunities 排名门槛（V1.3 §13, §62）。
+
+    最多 max_items 个，不是必须凑满；只有同时满足以下门槛才进入：
+    state ∈ allowed_states、opportunity >= min_opportunity、
+    signal_confirmation >= min_signal_confirmation、
+    data_confidence >= min_data_confidence、Trade Plan 合法、非 stale、非 pump_risk_high。
+    """
+
+    min_opportunity: float = Field(default=70.0, ge=0, le=100)
+    min_signal_confirmation: float = Field(default=75.0, ge=0, le=100)
+    min_data_confidence: float = Field(default=85.0, ge=0, le=100)
+    max_items: int = Field(default=10, ge=1, le=100)
+    allowed_states: list[str] = Field(
+        default_factory=lambda: ["START_CONFIRMED", "CONTINUATION"]
+    )
+    max_pump_risk: float = Field(default=50.0, ge=0, le=100, description="pump_risk 高于此值不进 Top Opportunity")
+    watch_max_items: int = Field(default=5, ge=1, le=50, description="首页『正在观察』最多条数（V1.3 §14）")
+    watch_states: list[str] = Field(
+        default_factory=lambda: ["ANOMALY", "SUSPECTED_START"]
+    )
+    # ── 首页刷新节奏（秒，V1.3 §12）──
+    refresh_price_s: float = Field(default=4.0, gt=0)
+    refresh_24h_s: float = Field(default=30.0, gt=0)
+    refresh_summary_s: float = Field(default=10.0, gt=0)
+    refresh_subscores_s: float = Field(default=20.0, gt=0)
+    refresh_opportunity_s: float = Field(default=30.0, gt=0)
+    refresh_signal_conf_s: float = Field(default=30.0, gt=0)
+    refresh_top10_s: float = Field(default=60.0, gt=0)
+    decision_snapshot_s: float = Field(default=30.0, gt=0, description="DecisionSnapshot 冻结周期")
+
+
+class SupervisionConfig(BaseModel):
+    """监督池频率配置（V1.3 §6.2-§6.8, §62）。
+
+    每个池使用独立监督间隔（秒）。后台 feature 计算仍保持 1~2s（§12），
+    本配置决定 state-aware 监督规则的执行节奏。
+    """
+
+    normal_interval_sec: float = Field(default=20.0, gt=0)
+    anomaly_interval_sec: float = Field(default=7.0, gt=0)
+    watch_interval_sec: float = Field(default=2.0, gt=0)
+    confirmed_interval_sec: float = Field(default=2.0, gt=0)
+    continuation_interval_sec: float = Field(default=3.0, gt=0)
+    risk_interval_sec: float = Field(default=2.0, gt=0)
+    exit_interval_sec: float = Field(default=2.0, gt=0)
+    archive_interval_sec: float = Field(default=30.0, gt=0)
+    # 状态滞回（V1.3 §10）：降级需要连续 N 次失去核心条件
+    hysteresis_downgrade_streak: int = Field(default=3, ge=1)
+    # 驻留保护：进入新池后至少驻留此秒数才允许降级转移
+    min_pool_dwell_s: float = Field(default=60.0, gt=0)
+
+
+class SimulationConfig(BaseModel):
+    """模拟验证配置（V1.3 §62）。
+
+    系统只做 Paper / Shadow Trading（AI_RULES 硬规则1）：
+    禁止真实下单、禁止 API Key 交易权限。
+    """
+
+    recommendation_expire_minutes: float = Field(default=60.0, gt=0, description="WATCHING 推荐过期时长")
+    require_revalidation: bool = Field(default=True, description="进入关注区后必须二次验证才入场")
+    static_track_max_hours: float = Field(default=24.0, gt=0, description="静态计划结果最长后台跟踪时长")
+    revalidation_stale_max_s: float = Field(default=30.0, gt=0, description="数据超过此秒数视为 stale，取消入场")
+    withdrawal_confirm_s: float = Field(default=30.0, gt=0, description="撤离信号需连续确认此秒数")
+    direction_flip_confirm_s: float = Field(default=20.0, gt=0, description="方向翻转需连续确认此秒数")
+    entry_zone_grace_s: float = Field(default=10.0, gt=0, description="进入关注区后未通过验证的宽限期")
+
+
 class AppConfigBundle(BaseModel):
     """全部配置的聚合。"""
 
@@ -248,6 +334,10 @@ class AppConfigBundle(BaseModel):
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
     recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
     market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
+    health_coverage: HealthCoverageConfig = Field(default_factory=HealthCoverageConfig)
+    ranking: RankingConfig = Field(default_factory=RankingConfig)
+    supervision: SupervisionConfig = Field(default_factory=SupervisionConfig)
+    simulation: SimulationConfig = Field(default_factory=SimulationConfig)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -278,6 +368,11 @@ def load_config(configs_dir: Path) -> AppConfigBundle:
         "detectors": "detectors.yaml",
         "hysteresis": "hysteresis.yaml",
         "scoring": "scoring.yaml",
+        "market_regime": "market_regime.yaml",
+        "health_coverage": "health_coverage.yaml",
+        "ranking": "ranking.yaml",
+        "supervision": "supervision.yaml",
+        "simulation": "simulation.yaml",
     }
     raw: dict[str, Any] = {}
     for key, filename in files.items():

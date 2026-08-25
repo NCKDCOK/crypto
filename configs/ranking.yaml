@@ -1,0 +1,22 @@
+# Top Opportunities 排名门槛（V1.3 §13, §62）
+# 最多 max_items 个，不是必须凑满；0 个就显示"暂无确认机会"。
+min_opportunity: 70.0           # 机会分门槛
+min_signal_confirmation: 75.0   # 信号确认门槛
+min_data_confidence: 85.0       # 数据可信门槛
+max_items: 10                   # Top Opportunities 最多条数
+allowed_states: ["START_CONFIRMED", "CONTINUATION"]
+max_pump_risk: 50.0             # pump_risk 高于此值不进 Top Opportunity
+
+# 首页『正在观察』区域（V1.3 §14）— 最多 watch_max_items 个
+watch_max_items: 5
+watch_states: ["ANOMALY", "SUSPECTED_START"]
+
+# ── 首页刷新节奏（秒，V1.3 §12）──
+refresh_price_s: 4.0            # 当前价格 3~5s
+refresh_24h_s: 30.0             # 24h 涨跌 30s
+refresh_summary_s: 10.0         # 资金摘要 10s
+refresh_subscores_s: 20.0       # 子评分 15~30s
+refresh_opportunity_s: 30.0     # Opportunity 30s
+refresh_signal_conf_s: 30.0     # Signal Confirmation 30s
+refresh_top10_s: 60.0           # Top10 排名 60s
+decision_snapshot_s: 30.0       # DecisionSnapshot 冻结周期（后端）

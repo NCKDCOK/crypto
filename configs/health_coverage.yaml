@@ -1,0 +1,5 @@
+# Data Health 覆盖率阈值（V1.3 §46）
+# 覆盖率 = 健康（OK/WARN）的 symbol×stream 配对占全部注册配对的比例。
+ok_min: 90.0                    # >= 90% 正常
+degraded_min: 70.0              # 70~90% 部分降级；< 70% 异常
+critical_stream_prefix: "aggTrade"  # 该核心流全部 FAIL → 严重异常（无论覆盖率）
