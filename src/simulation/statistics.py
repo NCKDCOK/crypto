@@ -44,7 +44,7 @@ class SimulationStatistics:
             if i.get("entry_zone_reached_at") is not None or i.get("armed_at") is not None
         ]
         reval_passed = [i for i in queue_items
-                        if i.get("revalidate_result", {}).get("passed") or i.get("armed_at") is not None]
+                        if (i.get("revalidate_result") or {}).get("passed") or i.get("armed_at") is not None]
         closed_results = [r for r in results if r.get("exit_reason")]
 
         def _count(pred) -> int:

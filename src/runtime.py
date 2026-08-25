@@ -1862,6 +1862,179 @@ class MarketRadarRuntime:
             "recovery": _recovery_dict(self.recovery_report),
         }
 
+    # ── V1.3 P2 API（§63–§65）：首页 / 市场 / 监督台 / 模拟验证 ──
+
+    def get_home(self) -> dict[str, Any]:
+        """§64 首页 API — 返回稳定决策快照，不返回每秒变动的底层 Score。
+
+        - confirmed_opportunities：正式 Top 机会（§13 门槛 + LIVE 门控）；每行附带
+          decision_snapshot（§11 冻结 {frozen_at, decision}）与实时值，供 §55/§56 双值显示。
+        - watch_candidates：§14 正在观察（ANOMALY / SUSPECTED_START，最多 watch_max_items 条）。
+        - risk_candidates：RISK / EXIT 池中高风险标的（Pump / 派发 / 撤离）。
+        """
+        confirmed = []
+        for r in self.get_top10():
+            st = self.get_state(r["symbol"])
+            row = dict(r)
+            row["decision_snapshot"] = st.decision_snapshot or {}
+            confirmed.append(row)
+        return {
+            "market_regime": self.market_regime.to_dict() if self.market_regime else None,
+            "health": self.get_health_coverage(),
+            "confirmed_opportunities": confirmed,
+            "watch_candidates": self._watch_candidates(),
+            "risk_candidates": self._risk_candidates(),
+        }
+
+    def get_market_overview(self) -> dict[str, Any]:
+        """§63 GET /api/market — 全市场页数据源（结论 + 市场背景 + 统计 + Top10）。"""
+        return self.get_market_summary()
+
+    def _watch_candidates(self) -> list[dict[str, Any]]:
+        """§14 首页『正在观察』最多 watch_max_items 条（配置化 watch_states）。"""
+        rk = self.cfg.ranking
+        items = [
+            s for s in self.latest_state.values()
+            if s.state.value in rk.watch_states and s.score_available
+        ]
+        items.sort(key=lambda s: s.opportunity_score, reverse=True)
+        out: list[dict[str, Any]] = []
+        for s in items[: rk.watch_max_items]:
+            out.append({
+                "symbol": s.symbol,
+                "state": s.state.value,
+                "state_label": PresentationTranslator.state_label(s.state),
+                "state_display": PresentationTranslator.state_display(s.state),
+                "direction": s.direction.value if s.direction else None,
+                "direction_label": PresentationTranslator.direction_label(s.direction),
+                "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+                "data_confidence": round(s.data_confidence, 1) if s.data_confidence_available else None,
+                "signal_confirmation": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
+                "summary": s.summary,
+                "current_price": self.universe.get_ticker(s.symbol).get("last_price", 0.0),
+                "price_change_24h": s.price_change_24h,
+                "setup_type": s.setup_type,
+                "setup_label": s.setup_label,
+                "decision_snapshot": s.decision_snapshot or {},
+            })
+        return out
+
+    def _risk_candidates(self) -> list[dict[str, Any]]:
+        """风险提示列表：RISK / EXIT 池标的，按风险强度（Pump + 派发）降序。"""
+        out: list[dict[str, Any]] = []
+        for rec in self.supervisor.all_records():
+            if rec.current_pool.value not in ("risk", "exit"):
+                continue
+            s = self.get_state(rec.symbol)
+            out.append({
+                "symbol": rec.symbol,
+                "pool": rec.current_pool.value,
+                "state": s.state.value,
+                "state_label": PresentationTranslator.state_label(s.state),
+                "state_display": PresentationTranslator.state_display(s.state),
+                "setup_type": s.setup_type,
+                "setup_label": s.setup_label,
+                "pump_risk": s.pump_risk,
+                "distribution_risk": s.distribution_risk,
+                "current_price": self.universe.get_ticker(rec.symbol).get("last_price", 0.0),
+                "entered_pool_at": rec.entered_pool_at,
+            })
+        out.sort(key=lambda x: (x.get("pump_risk") or 0.0) + (x.get("distribution_risk") or 0.0),
+                 reverse=True)
+        return out
+
+    def _supervision_row(self, rec) -> dict[str, Any]:
+        """一条监督池记录 + 实时状态（§65 监督台行）。"""
+        s = self.get_state(rec.symbol)
+        return {
+            "symbol": rec.symbol,
+            "current_pool": rec.current_pool.value,
+            "current_state": rec.current_state.value,
+            "state_label": PresentationTranslator.state_label(rec.current_state),
+            "state_display": PresentationTranslator.state_display(rec.current_state),
+            "direction": s.direction.value if s.direction else None,
+            "direction_label": PresentationTranslator.direction_label(s.direction),
+            "setup_type": s.setup_type,
+            "setup_label": s.setup_label,
+            "supervision_level": rec.supervision_level.value,
+            "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+            "current_price": self.universe.get_ticker(rec.symbol).get("last_price", 0.0),
+            "entered_pool_at": rec.entered_pool_at,
+            "entered_state_at": rec.entered_state_at,
+            "last_transition_at": rec.last_transition_at,
+            "condition_fail_streak": rec.condition_fail_streak,
+            "last_action": rec.last_action.value,
+        }
+
+    def get_supervision_kanban(self) -> dict[str, Any]:
+        """§65 监督台 API — 按池返回矩阵（anomaly/watch/confirmed/continuation/risk/exit...）。"""
+        kanban: dict[str, Any] = {}
+        for pool_name, recs in self.supervisor.by_pool().items():
+            kanban[pool_name.value] = [self._supervision_row(r) for r in recs]
+        return kanban
+
+    def get_supervision_symbol(self, symbol: str) -> dict[str, Any] | None:
+        """§63 /api/supervision/{symbol} — 单 symbol 监督详情 + §42 状态时间线。"""
+        rec = self.supervisor.get_record(symbol)
+        if rec is None:
+            return None
+        s = self.get_state(symbol)
+        timeline = [
+            {"asof": e.asof, "previous_state": e.previous_state.value, "new_state": e.new_state.value}
+            for e in self.transition_history
+            if e.symbol == symbol
+        ][-20:]
+        return {
+            **self._supervision_row(rec),
+            "supervision_question": self.supervisor.pools.spec(rec.current_pool).supervision_question,
+            "distribution_risk": s.distribution_risk,
+            "pump_risk": s.pump_risk,
+            "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
+            "score_breakdown": s.score_breakdown,
+            "summary": s.summary,
+            "timeline": PresentationTranslator.translate_timeline(timeline),
+            "supervision": s.supervision,
+        }
+
+    def get_simulations(self) -> dict[str, Any]:
+        """§63 /api/simulations — 模拟验证列表数据源（队列 + 持仓 + 结果）。"""
+        positions = [p.to_dict() for p in self.simulation_positions.all()]
+        return {
+            "queue": [i.to_dict() for i in self.simulation_queue.all()],
+            "positions": positions,
+            "open_positions": [p for p in positions if p.get("status") == "OPEN"],
+            "results": self.repository.list_simulation_results(),
+        }
+
+    def get_simulation(self, simulation_id: str) -> dict[str, Any] | None:
+        """§63 /api/simulations/{id} — 单条模拟：队列项 + 持仓 + 事件流 + 结果。"""
+        item = self.simulation_queue.get(simulation_id)
+        if item is None:
+            for it in self.repository.list_simulation_queue():
+                if it.get("simulation_id") == simulation_id:
+                    item_dict = it
+                    break
+            else:
+                return None
+        else:
+            item_dict = item.to_dict()
+        pos = self.simulation_positions.get(simulation_id)
+        pos_dict = pos.to_dict() if pos is not None else self.repository.get_simulation_position(simulation_id)
+        return {
+            "item": item_dict,
+            "position": pos_dict,
+            "events": self.repository.list_simulation_events(simulation_id),
+            "result": self.repository.get_simulation_result(simulation_id),
+        }
+
+    def get_simulation_statistics(self) -> dict[str, Any]:
+        """§63 /api/statistics — §37–§39 统计汇总（纯函数，数据取自持久层）。"""
+        return self.simulation_stats.compute(
+            recommendations=self.repository.list_recommendation_snapshots(),
+            queue_items=self.repository.list_simulation_queue(),
+            results=self.repository.list_simulation_results(),
+        )
+
 
 def _ev_dict(e) -> dict[str, Any]:
     return {

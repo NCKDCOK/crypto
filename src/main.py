@@ -15,7 +15,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -143,3 +143,74 @@ async def get_pushes():
     if runtime is None:
         return []
     return runtime.push_history[-50:]
+
+
+# ── V1.3 P2 API（§63–§65）──
+
+
+@app.get("/api/home")
+async def get_home():
+    """§64 首页 — 稳定决策快照（不返回每秒变动的底层 Score）。"""
+    if runtime is None:
+        return {
+            "market_regime": None,
+            "health": {},
+            "confirmed_opportunities": [],
+            "watch_candidates": [],
+            "risk_candidates": [],
+        }
+    return runtime.get_home()
+
+
+@app.get("/api/market")
+async def get_market():
+    """§63 全市场 — 结论 + 市场背景 + 统计 + Top10。"""
+    if runtime is None:
+        return {"conclusion": "系统启动中...", "top10": [], "state_counts": {}}
+    return runtime.get_market_overview()
+
+
+@app.get("/api/supervision")
+async def get_supervision():
+    """§65 监督台 — 按池返回矩阵（anomaly/watch/confirmed/continuation/risk/exit）。"""
+    if runtime is None:
+        return {}
+    return runtime.get_supervision_kanban()
+
+
+@app.get("/api/supervision/{symbol}")
+async def get_supervision_symbol(symbol: str):
+    """单 symbol 监督详情 + §42 状态时间线。"""
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="runtime not ready")
+    row = runtime.get_supervision_symbol(symbol)
+    if row is None:
+        raise HTTPException(status_code=404, detail="symbol not supervised")
+    return row
+
+
+@app.get("/api/simulations")
+async def get_simulations():
+    """模拟验证 — 队列 + 持仓 + 结果列表。"""
+    if runtime is None:
+        return {"queue": [], "positions": [], "open_positions": [], "results": []}
+    return runtime.get_simulations()
+
+
+@app.get("/api/simulations/{simulation_id}")
+async def get_simulation(simulation_id: str):
+    """单条模拟 — 队列项 + 持仓 + 事件流 + 结果。"""
+    if runtime is None:
+        raise HTTPException(status_code=503, detail="runtime not ready")
+    detail = runtime.get_simulation(simulation_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="simulation not found")
+    return detail
+
+
+@app.get("/api/statistics")
+async def get_statistics():
+    """§37–§39 模拟统计汇总。"""
+    if runtime is None:
+        return {"overview": {}, "buckets": {}, "setup_conversion": {}}
+    return runtime.get_simulation_statistics()
