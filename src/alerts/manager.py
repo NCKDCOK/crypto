@@ -48,7 +48,47 @@ DEFAULT_RULES: dict[State, AlertRule] = {
         cooldown_s=600,
         message_template="🔴 {symbol} WITHDRAWAL — 资金撤离确认",
     ),
+    State.CONTINUATION: AlertRule(
+        state=State.CONTINUATION,
+        min_confidence="CONFIDENT",
+        cooldown_s=600,
+        message_template="📈 {symbol} CONTINUATION — 趋势延续",
+    ),
 }
+
+
+@dataclass
+class PushRecord:
+    """V1.2 §38 推送记录（State Transition Push）。"""
+
+    symbol: str
+    state: str
+    direction: str | None
+    message: str
+    asof: int
+    # V1.2 §38 完整字段
+    opportunity_score: float | None = None
+    signal_confirmation: float | None = None
+    data_confidence: float | None = None
+    setup_type: str | None = None
+    trade_plan: dict[str, Any] | None = None
+    evidence_count: int = 0
+    veto_count: int = 0
+    one_line: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "symbol": self.symbol, "state": self.state, "direction": self.direction,
+            "message": self.message, "asof": self.asof,
+            "opportunity_score": self.opportunity_score,
+            "signal_confirmation": self.signal_confirmation,
+            "data_confidence": self.data_confidence,
+            "setup_type": self.setup_type,
+            "trade_plan": self.trade_plan,
+            "evidence_count": self.evidence_count,
+            "veto_count": self.veto_count,
+            "one_line": self.one_line,
+        }
 
 
 @dataclass
@@ -137,6 +177,44 @@ class AlertManager:
 
         logger.info("alert_sent symbol=%s state=%s", event.symbol, event.new_state.value)
         return record
+
+    def build_push(
+        self,
+        event: AnalysisEvent,
+        *,
+        opportunity_score: float | None = None,
+        signal_confirmation: float | None = None,
+        data_confidence: float | None = None,
+        setup_type: str | None = None,
+        trade_plan: dict[str, Any] | None = None,
+        one_line: str = "",
+    ) -> PushRecord | None:
+        """V1.2 §37-38 构建 State Transition Push 记录。
+
+        仅在重要状态迁移时推送（SUSPECTED→CONFIRMED / CONFIRMED→CONTINUATION /
+        CONTINUATION→EXHAUSTION / EXHAUSTION→WITHDRAWAL）。
+        """
+        push_states = {
+            State.START_CONFIRMED, State.CONTINUATION,
+            State.EXHAUSTION, State.WITHDRAWAL,
+        }
+        if event.new_state not in push_states:
+            return None
+        return PushRecord(
+            symbol=event.symbol,
+            state=event.new_state.value,
+            direction=event.direction.value if event.direction else None,
+            message=f"{event.symbol} {event.new_state.value}",
+            asof=event.asof,
+            opportunity_score=opportunity_score,
+            signal_confirmation=signal_confirmation,
+            data_confidence=data_confidence,
+            setup_type=setup_type,
+            trade_plan=trade_plan,
+            evidence_count=len(event.evidence),
+            veto_count=len(event.vetoes),
+            one_line=one_line,
+        )
 
     def get_history(self) -> list[AlertRecord]:
         return list(self._history)

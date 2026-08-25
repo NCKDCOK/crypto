@@ -11,7 +11,8 @@ print(f"  detectors.light_volume_delta_z = {cfg.detectors.light_volume_delta_z}"
 print(f"  features.kline_context_intervals = {cfg.features.kline_context_intervals}")
 
 from src.scoring.engine import ScoreEngine
-from src.scoring.confidence import ConfidenceEngine
+from src.scoring.data_confidence import DataConfidenceEngine
+from src.scoring.signal_confirmation import SignalConfirmationEngine, ConfirmationContext
 from src.presentation.translator import PresentationTranslator
 from src.presentation.ranking import rank_symbols
 print("All V1.1 modules imported OK")
@@ -56,14 +57,22 @@ print(f"  Base = {bd.base_score:.1f}, Risk penalty = {bd.risk_penalty:.1f}")
 for k, ss in bd.subscores.items():
     print(f"  {ss.label}: {ss.score:.1f} {'[risk]' if ss.is_risk else ''}")
 
-# Confidence engine
-ceng = ConfidenceEngine(cfg.scoring)
-cb = ceng.compute("CONFIDENT", snap, 5, sample_count=20)  # type: ignore
-print(f"\nConfidence = {cb.confidence:.2%}")
+# Data Confidence + Signal Confirmation (V1.2 §3-4)
+from src.domain import ConfidenceState
+dc_eng = DataConfidenceEngine(cfg.scoring)
+dc = dc_eng.compute(ConfidenceState.CONFIDENT, snap, sample_count=20)
+print(f"\nDataConfidence = {dc.score:.1f}  coverage={dc.coverage:.2f}  missing={dc.missing}")
 
-# Ranking
+sc_eng = SignalConfirmationEngine(cfg.scoring)
+sctx = ConfirmationContext(direction="LONG", evidence_count=5, veto_count=0,
+                           breakout_acceptance=0.9)
+sc = sc_eng.compute(snap, sctx, sample_count=20, data_confidence_score=dc.score)
+print(f"SignalConfirmation = {sc.score:.1f}  core={sc.core_passed}/{sc.core_total} "
+      f"support={sc.supporting_passed}/{sc.supporting_total} strong={sc.strong_confirm}")
+
+# Ranking (V1.2 §26: opportunity × signal × data)
 from src.presentation.ranking import compute_ranking_score
-rs = compute_ranking_score(bd.opportunity_score, cb.confidence)
+rs = compute_ranking_score(bd.opportunity_score, sc.score, dc.score)
 print(f"RankingScore = {rs:.1f}")
 
-print("\nAll V1.1 smoke tests passed!")
+print("\nAll V1.2 smoke tests passed!")

@@ -24,6 +24,7 @@ from src.domain import (
 )
 from .efficiency_features import compute_efficiency_features
 from .flow_features import CVDTracker, compute_taker_buy_sell_volume, compute_taker_delta
+from .impulse_features import compute_impulse_asymmetry
 from .oi_features import compute_oi_features
 from .price_features import compute_price_features, compute_price_return
 from .volume_features import compute_volume_features
@@ -52,6 +53,11 @@ class FeatureEngineState:
     symbol: str
     window_manager: object  # WindowManager
     cvd: CVDTracker = field(default_factory=CVDTracker)
+    # V1.2 §9 Spot 数据
+    spot_window_manager: object | None = None  # WindowManager for spot trades
+    spot_cvd: CVDTracker = field(default_factory=CVDTracker)
+    spot_available: bool = False  # 该 symbol 是否有现货市场
+    spot_last_receive_time: int | None = None
     # 基线历史（按主窗口）
     baseline_volumes: list[float] = field(default_factory=list)
     baseline_trade_counts: list[float] = field(default_factory=list)
@@ -63,6 +69,8 @@ class FeatureEngineState:
     latest_funding: FundingRateSnapshot | None = None
     # Kline 上下文：interval → 最近 closed bar
     klines: dict[str, KlineEvent] = field(default_factory=dict)
+    # Kline 历史序列：interval → closed bar 列表（V1.2 Structure/VP 用，恢复时加载）
+    kline_history: dict[str, list[KlineEvent]] = field(default_factory=dict)
     # 健康摘要：stream → HealthLevel value
     health_summary: dict[str, str] = field(default_factory=dict)
     # 最新 FeatureSnapshot
@@ -84,20 +92,45 @@ class FeatureEngine:
         epsilon: float = 1.0,
         oi_tolerance_ms: int = 15_000,
         baseline_max_samples: int = 360,
+        kline_history_max: int = 500,
     ) -> None:
         self.trade_flow_windows_ms = tuple(trade_flow_windows_ms)
         self.kline_intervals = tuple(kline_intervals)
         self.epsilon = epsilon
         self.oi_tolerance_ms = oi_tolerance_ms
         self.baseline_max_samples = baseline_max_samples
+        self.kline_history_max = kline_history_max
         self._states: dict[str, FeatureEngineState] = {}
 
     def get_state(self, symbol: str) -> FeatureEngineState:
         if symbol not in self._states:
             from src.windows.rolling_window import WindowManager
             wm = WindowManager(list(self.trade_flow_windows_ms))
-            self._states[symbol] = FeatureEngineState(symbol=symbol, window_manager=wm)
+            self._states[symbol] = FeatureEngineState(
+                symbol=symbol, window_manager=wm,
+                spot_window_manager=WindowManager(list(self.trade_flow_windows_ms)),
+            )
         return self._states[symbol]
+
+    def set_spot_available(self, symbol: str, available: bool) -> None:
+        """标记该 symbol 是否有现货市场（runtime 由 SpotSymbolRegistry 注入）。"""
+        state = self.get_state(symbol)
+        state.spot_available = available
+
+    def add_spot_trade(self, symbol: str, trade: TradeEvent) -> None:
+        """注入一笔现货成交 → spot WindowManager + spot CVD。"""
+        state = self.get_state(symbol)
+        if state.spot_window_manager is None:
+            from src.windows.rolling_window import WindowManager
+            state.spot_window_manager = WindowManager(list(self.trade_flow_windows_ms))
+        state.spot_window_manager.add(trade.receive_time, trade)
+        signed = float(trade.quote_notional)
+        if trade.aggressor_side.value == "SELL":
+            signed = -signed
+        elif trade.aggressor_side.value == "UNKNOWN":
+            signed = 0.0
+        state.spot_cvd.update(symbol, signed, trade.receive_time)
+        state.spot_last_receive_time = trade.receive_time
 
     # ── 事件注入 ──
 
@@ -132,6 +165,29 @@ class FeatureEngine:
         state = self.get_state(kline.symbol)
         # 仅保留最近 closed bar（慢周期确认）；未闭合也更新以供实时 context
         state.klines[kline.interval.value] = kline
+        # V1.2：closed bar 追加历史序列（供 Structure/VP）
+        if kline.is_closed:
+            hist = state.kline_history.setdefault(kline.interval.value, [])
+            # 去重 + 保持时间正序
+            if not hist or kline.open_time > hist[-1].open_time:
+                hist.append(kline)
+            elif kline.open_time < hist[0].open_time:
+                hist.insert(0, kline)
+            # 上限保护
+            if len(hist) > self.kline_history_max:
+                state.kline_history[kline.interval.value] = hist[-self.kline_history_max:]
+
+    def load_kline_history(self, symbol: str, interval: str, bars: list[KlineEvent]) -> None:
+        """从持久化加载历史 K 线序列（恢复时调用）。"""
+        state = self.get_state(symbol)
+        sorted_bars = sorted(bars, key=lambda k: k.open_time)
+        state.kline_history[interval] = sorted_bars[-self.kline_history_max:]
+        if sorted_bars:
+            state.klines[interval] = sorted_bars[-1]
+
+    def get_kline_history(self, symbol: str, interval: str) -> list[KlineEvent]:
+        state = self.get_state(symbol)
+        return list(state.kline_history.get(interval, []))
 
     def set_health(self, symbol: str, health_summary: dict[str, str]) -> None:
         """注入该 symbol 各流的健康摘要（stream → HealthLevel value）。"""
@@ -216,6 +272,35 @@ class FeatureEngine:
         features["taker_delta"] = _fv(delta, "30s")
         provenance["flow"] = {"cvd": cvd, "source_streams": ["aggTrade"]}
 
+        # ── V1.2 §9 Spot 数据（现货市场资金流）──
+        if state.spot_available and state.spot_window_manager is not None:
+            spot_trades = state.spot_window_manager.get_items(PRIMARY_WINDOW_MS, now_ms)
+            spot_vol = _window_volume(spot_trades) or 0.0
+            spot_buy, spot_sell = compute_taker_buy_sell_volume(spot_trades)
+            spot_delta = compute_taker_delta(spot_trades)
+            spot_cvd = state.spot_cvd.get_cvd(symbol)
+            spot_cvd_slope = state.spot_cvd.get_cvd_slope(symbol)
+            spot_cvd_slope_z = state.spot_cvd.get_cvd_slope_z(symbol)
+            features["spot_volume"] = _fv(spot_vol, "30s")
+            features["spot_taker_buy"] = _fv(spot_buy, "30s")
+            features["spot_taker_sell"] = _fv(spot_sell, "30s")
+            features["spot_delta"] = _fv(spot_delta, "30s")
+            features["spot_cvd"] = _fv(spot_cvd, None)
+            features["spot_cvd_slope"] = _fv(spot_cvd_slope, "30s")
+            features["spot_cvd_slope_z"] = _fv(spot_cvd_slope_z, "30s")
+            # Spot × Perp 一致性（P6）：现货 delta 与合约 delta 同向 → 1，反向 → -1
+            if spot_delta is not None and delta is not None:
+                agreement = 1.0 if (spot_delta * delta > 0) else (-1.0 if (spot_delta * delta < 0) else 0.0)
+            else:
+                agreement = None
+            features["spot_perp_agreement"] = _fv(agreement, "30s")
+            provenance["spot"] = {"source_streams": ["spot_aggTrade"]}
+        else:
+            # 无现货市场 → 标记 unavailable（§5：不伪造）
+            for k in ("spot_volume", "spot_taker_buy", "spot_taker_sell", "spot_delta",
+                      "spot_cvd", "spot_cvd_slope", "spot_cvd_slope_z", "spot_perp_agreement"):
+                features[k] = _fv(None, None)
+
         # ── 价类（主窗口 + 5m 参考突破）──
         ref_long = wm.get_items(300_000, now_ms)
         price_feats = compute_price_features(primary_trades, ref_long, direction_hint)
@@ -243,6 +328,16 @@ class FeatureEngine:
             "trade_count": len(primary_trades),
             "source_streams": ["aggTrade"],
         }
+
+        # ── V1.2 §10 多空推动效率（Impulse Asymmetry）──
+        impulse = compute_impulse_asymmetry(primary_trades)
+        features["upside_velocity"] = _fv(impulse.upside_velocity, "30s")
+        features["downside_velocity"] = _fv(impulse.downside_velocity, "30s")
+        features["upside_volume_efficiency"] = _fv(impulse.upside_volume_efficiency, "30s")
+        features["downside_volume_efficiency"] = _fv(impulse.downside_volume_efficiency, "30s")
+        features["upside_delta_efficiency"] = _fv(impulse.upside_delta_efficiency, "30s")
+        features["downside_delta_efficiency"] = _fv(impulse.downside_delta_efficiency, "30s")
+        features["impulse_ratio"] = _fv(impulse.impulse_ratio, "30s")
 
         # ── OI ──
         oi_feats = compute_oi_features(state.oi_snapshots, self.oi_tolerance_ms)

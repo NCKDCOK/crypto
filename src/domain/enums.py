@@ -130,3 +130,16 @@ class VetoSeverity(str, Enum):
 
     HARD = "hard"
     SOFT = "soft"
+
+
+class SystemMode(str, Enum):
+    """系统运行模式（V1.2 停机恢复）。
+
+    - RECOVERY：启动后正在补历史缺口 / 重建慢变量。可展示数据，不发正式推送、不进入强确认 Top10。
+    - WARMUP：历史已补，OI/CVD/Delta 基线重新预热中（最小样本未达）。
+    - LIVE：正常评分、排名、推送。
+    """
+
+    RECOVERY = "RECOVERY"
+    WARMUP = "WARMUP"
+    LIVE = "LIVE"

@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -33,6 +34,7 @@ from src.collectors.funding_collector import FundingPremiumCollector
 from src.collectors.kline_collector import KlineCollector
 from src.collectors.oi_poller import OIPoller
 from src.collectors.symbol_registry import SymbolRegistry
+from src.collectors.spot_registry import SpotSymbolRegistry
 from src.config import AppConfigBundle
 from src.domain import (
     AnalysisEvent,
@@ -43,6 +45,7 @@ from src.domain import (
     HealthStatus,
     KlineInterval,
     State,
+    SystemMode,
 )
 from src.features.engine import FeatureEngine, WINDOW_BY_MS
 from src.health.confidence import ConfidenceTracker
@@ -57,9 +60,31 @@ from src.health.rate_limiter import RateLimiter, RateLimiterConfig
 from src.alerts.manager import AlertManager
 from src.state_machine.machine import StateMachine
 from src.scoring.engine import ScoreEngine
-from src.scoring.confidence import ConfidenceEngine
+from src.scoring.data_confidence import DataConfidenceEngine, DataConfidenceBreakdown
+from src.scoring.signal_confirmation import (
+    ConfirmationContext,
+    SignalConfirmationEngine,
+    SignalConfirmationBreakdown,
+)
 from src.presentation.translator import PresentationTranslator
 from src.presentation.ranking import rank_symbols, generate_system_conclusion
+from src.presentation.ranking_hysteresis import RankingHysteresis
+from src.market.regime import MarketRegimeEngine, MarketSnapshot, RegimeResult
+from src.recovery.manager import RecoveryManager, RecoveryReport
+from src.storage.sqlite_repository import SqliteRepository
+from src.engines.accumulation import AccumulationEngine
+from src.engines.dormant_revival import DormantRevivalEngine
+from src.engines.distribution import DistributionEngine
+from src.engines.impulse_asymmetry import ImpulseAsymmetryEngine
+from src.engines.setup_type import SetupTypeEngine
+from src.engines.spot_perp import SpotPerpConfirmationEngine
+from src.engines.structure import StructureEngine
+from src.engines.volume_profile import VolumeProfileEngine
+from src.engines.location import LocationEngine
+from src.engines.trend import TrendEngine
+from src.engines.pump_risk import PumpRiskEngine
+from src.engines.breakout_lifecycle import BreakoutLifecycleEngine
+from src.engines.trade_plan import TradePlanEngine
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +145,10 @@ def build_state_machine(cfg: AppConfigBundle) -> StateMachine:
             crowding_percentile_threshold=d.veto_crowding_percentile_threshold,
             one_bar_spike_retrace=d.veto_one_bar_spike_retrace,
         ),
-        continuation_detector=ContinuationDetector(min_oi_maintain=d.continuation_min_oi_maintain),
+        continuation_detector=ContinuationDetector(
+            min_oi_maintain=d.continuation_min_oi_maintain,
+            min_evidence_count=d.continuation_min_evidence_count,
+        ),
         exhaustion_detector=ExhaustionDetector(min_divergence_count=d.exhaustion_min_divergence_count),
         withdrawal_detector=WithdrawalDetector(min_evidence_count=d.withdrawal_min_evidence_count),
         confidence_tracker=ConfidenceTracker(),
@@ -173,11 +201,28 @@ class SymbolRuntimeState:
     opportunity_score: float = 0.0
     score_available: bool = False
     score_breakdown: dict[str, Any] = field(default_factory=dict)
-    confidence: float = 0.0
-    confidence_available: bool = False
-    confidence_breakdown: dict[str, Any] = field(default_factory=dict)
+    # 评分（V1.2 §3-4）：拆分数据可信度 / 信号确认度
+    data_confidence: float = 0.0  # 0~100
+    data_confidence_available: bool = False
+    data_confidence_breakdown: dict[str, Any] = field(default_factory=dict)
+    signal_confirmation: float = 0.0  # 0~100
+    signal_confirmation_available: bool = False
+    signal_confirmation_breakdown: dict[str, Any] = field(default_factory=dict)
     summary: str = ""
     stale_flag: float = 0.0
+    # V1.2 引擎结果
+    setup_type: str = "NONE"
+    setup_label: str = "无明确 Setup"
+    accumulation_score: float | None = None
+    distribution_risk: float | None = None
+    revival_score: float | None = None
+    impulse_label: str = ""
+    spot_perp_label: str = ""
+    location_label: str = ""
+    trend_score: float | None = None
+    trend_label: str = ""
+    pump_risk: float | None = None
+    trade_plan: dict[str, Any] = field(default_factory=dict)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -392,8 +437,12 @@ class DeepScanner:
         self._kline: KlineCollector | None = None
         self._oi: OIPoller | None = None
         self._funding: FundingPremiumCollector | None = None
+        self._spot: AggTradeCollector | None = None  # V1.2 §9 现货 aggTrade
+        self._spot_symbols: list[str] = []  # 有现货的 deep symbols
         self._trade_q: asyncio.Queue | None = None
+        self._spot_q: asyncio.Queue | None = None
         self._consumer_task: asyncio.Task | None = None
+        self._spot_consumer_task: asyncio.Task | None = None
         self._running = False
         # 多周期 Kline intervals
         self._kline_intervals = [
@@ -539,14 +588,36 @@ class DeepScanner:
             clock=self.runtime.clock,
             on_snapshot=self._on_funding,
         )
+        # V1.2 §9 现货 aggTrade（仅有现货的 symbol）
+        if self.cfg.app.enable_spot:
+            self._spot_symbols = [
+                s for s in self.symbols if self.runtime.spot_registry.has_spot(s)
+            ]
+            for s in self._spot_symbols:
+                self.runtime.feature_engine.set_spot_available(s, True)
+            self._spot_q = asyncio.Queue(maxsize=50000)
+            self._spot = AggTradeCollector(
+                symbols=self._spot_symbols,
+                config=WSStreamConfig(
+                    base_url=self.cfg.app.spot_ws_base_url, route="",
+                    streams=AggTradeCollector.build_streams(self._spot_symbols),
+                    proxy=proxy,
+                ),
+                clock=self.runtime.clock,
+                on_trade=self._on_spot_trade,
+            )
+            await self._spot.start()
+            self._spot_consumer_task = asyncio.create_task(self._consume_spot_trades())
+            logger.info("spot_collector_started spot_symbols=%d", len(self._spot_symbols))
         await self._aggtrade.start()
         await self._kline.start()
         await self._oi.start()
         await self._funding.start()
         self._running = True
         self._consumer_task = asyncio.create_task(self._consume_trades())
-        logger.info("deep_scanner_started symbols=%d kline_intervals=%s",
-                    len(self.symbols), [i.value for i in self._kline_intervals])
+        logger.info("deep_scanner_started symbols=%d kline_intervals=%s spot=%d",
+                    len(self.symbols), [i.value for i in self._kline_intervals],
+                    len(self._spot_symbols))
 
     async def _stop_collectors(self) -> None:
         self._running = False
@@ -557,14 +628,22 @@ class DeepScanner:
             except asyncio.CancelledError:
                 pass
             self._consumer_task = None
-        for c in (self._aggtrade, self._kline):
+        if self._spot_consumer_task:
+            self._spot_consumer_task.cancel()
+            try:
+                await self._spot_consumer_task
+            except asyncio.CancelledError:
+                pass
+            self._spot_consumer_task = None
+        for c in (self._aggtrade, self._kline, self._spot):
             if c:
                 await c.stop()
         for c in (self._oi, self._funding):
             if c:
                 await c.stop()
-        self._aggtrade = self._kline = self._oi = self._funding = None
+        self._aggtrade = self._kline = self._oi = self._funding = self._spot = None
         self._trade_q = None
+        self._spot_q = None
 
     # ── collector 回调（快速入队 / 直接处理）──
 
@@ -589,6 +668,9 @@ class DeepScanner:
 
     async def _on_kline(self, event) -> None:
         self.runtime.feature_engine.add_kline(event)
+        # V1.2 持久化 closed bar
+        if event.is_closed:
+            self.runtime.repository.save_kline(event)
         sid = f"{STREAM_KLINE}:{event.symbol}"
         self.runtime.watchdog.record_event(sid, event.event_time, event.receive_time)
         self.runtime.queue_monitor.record_lag(sid, event.event_time, event.receive_time)
@@ -596,11 +678,15 @@ class DeepScanner:
     async def _on_oi(self, event) -> None:
         self.runtime.feature_engine.add_oi_snapshot(event)
         self.runtime.oi_lookup.add_snapshot(event)
+        # V1.2 持久化 OI 快照
+        self.runtime.repository.save_oi_snapshot(event)
         sid = f"{STREAM_OI}:{event.symbol}"
         self.runtime.watchdog.record_event(sid, event.event_time, event.receive_time)
 
     async def _on_funding(self, event) -> None:
         self.runtime.feature_engine.add_funding_snapshot(event)
+        # V1.2 持久化 Funding 快照
+        self.runtime.repository.save_funding_snapshot(event)
         sid = f"{STREAM_FUNDING}:{event.symbol}"
         self.runtime.watchdog.record_event(sid, event.event_time, event.receive_time)
 
@@ -623,6 +709,33 @@ class DeepScanner:
             self.runtime.watchdog.record_event(sid, event.event_time, event.receive_time)
             self.runtime.queue_monitor.record_lag(sid, event.event_time, event.receive_time)
 
+    # ── V1.2 §9 现货 trade ──
+
+    async def _on_spot_trade(self, event) -> None:
+        q = self._spot_q
+        if q is None:
+            return
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            try:
+                q.get_nowait()
+                q.put_nowait(event)
+            except Exception:
+                pass
+
+    async def _consume_spot_trades(self) -> None:
+        """消费现货 trade queue → FeatureEngine.add_spot_trade。"""
+        q = self._spot_q
+        while self._running and q is not None:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            self.runtime.feature_engine.add_spot_trade(event.symbol, event)
+
     @property
     def dedup(self):
         return self._aggtrade.dedup if self._aggtrade else None
@@ -636,7 +749,8 @@ class DeepScanner:
 class MarketRadarRuntime:
     """市场雷达 runtime — 编排两阶段 Radar + Health + Feature + Detector + StateMachine。"""
 
-    def __init__(self, cfg: AppConfigBundle, clock: Clock | None = None) -> None:
+    def __init__(self, cfg: AppConfigBundle, clock: Clock | None = None,
+                 repository: "Repository | None" = None) -> None:
         self.cfg = cfg
         self.clock = clock or SystemClock()
         self.rate_limiter = RateLimiter(
@@ -666,11 +780,52 @@ class MarketRadarRuntime:
         self.state_machine = build_state_machine(cfg)
         self.confidence = self.state_machine.confidence  # ConfidenceTracker
         self.alerts = AlertManager()
+        self.push_history: list[dict[str, Any]] = []  # V1.2 §37 推送历史
         self.universe = SymbolUniverse(cfg, self.rate_limiter, self.clock)
         self.light_scanner = LightScanner(cfg, self.universe, self.clock)
         self.deep_scanner = DeepScanner(cfg, self)
+        # V1.2 §9 现货注册表
+        self.spot_registry = SpotSymbolRegistry(quote_asset=cfg.symbols.quote_asset)
         self.score_engine = ScoreEngine(cfg.scoring)
-        self.confidence_engine = ConfidenceEngine(cfg.scoring)
+        self.data_confidence_engine = DataConfidenceEngine(cfg.scoring)
+        self.signal_confirmation_engine = SignalConfirmationEngine(cfg.scoring)
+
+        # V1.2 持久化 + 停机恢复
+        if repository is not None:
+            self.repository = repository
+        else:
+            data_dir = Path(cfg.app.data_dir)
+            data_dir.mkdir(parents=True, exist_ok=True)
+            self.repository = SqliteRepository(data_dir / "radar.db")
+        self.recovery_manager = RecoveryManager(
+            repo=self.repository,
+            cfg=cfg.recovery,
+            clock=self.clock,
+            rate_limiter=self.rate_limiter,
+            rest_base_url=cfg.app.rest_base_url,
+            feature_engine=self.feature_engine,
+        )
+        self.system_mode: SystemMode = SystemMode.WARMUP
+        self.recovery_report: RecoveryReport | None = None
+        # V1.2 §6.4 Top10 排名滞回
+        self.ranking_hysteresis = RankingHysteresis()
+        # V1.2 §8 市场背景引擎
+        self.market_regime_engine = MarketRegimeEngine(cfg.market_regime)
+        self.market_regime: RegimeResult | None = None
+        # V1.2 行为引擎
+        self.accumulation_engine = AccumulationEngine()
+        self.dormant_revival_engine = DormantRevivalEngine()
+        self.distribution_engine = DistributionEngine()
+        self.impulse_engine = ImpulseAsymmetryEngine()
+        self.setup_type_engine = SetupTypeEngine()
+        self.spot_perp_engine = SpotPerpConfirmationEngine()
+        self.structure_engine = StructureEngine()
+        self.volume_profile_engine = VolumeProfileEngine()
+        self.location_engine = LocationEngine()
+        self.trend_engine = TrendEngine()
+        self.pump_risk_engine = PumpRiskEngine()
+        self.breakout_lifecycle_engine = BreakoutLifecycleEngine()
+        self.trade_plan_engine = TradePlanEngine()
 
         # 状态存储
         self.latest_state: dict[str, SymbolRuntimeState] = {}
@@ -696,6 +851,10 @@ class MarketRadarRuntime:
         self._running = True
         # 初始 universe
         await self.universe.refresh()
+        # V1.2 §9 初始现货注册表
+        if self.cfg.app.enable_spot:
+            await self.spot_registry.fetch_from_api(
+                self.cfg.app.spot_rest_base_url, proxy=self.cfg.app.proxy)
         # 初始 deep set = top deep_max_symbols by light score（首次用 volume 排序兜底）
         max_deep = self.cfg.hysteresis.max_deep_symbols
         initial = self.universe.universe[:max_deep]
@@ -704,14 +863,32 @@ class MarketRadarRuntime:
         for sym in initial:
             self._deep_entered_at[sym] = now_ms
             self._deep_drop_count[sym] = 0
+
+        # V1.2 停机恢复：后台异步补历史 K 线（不阻塞 server 启动）
+        intervals = [i.value for i in self.deep_scanner._kline_intervals] or ["1m", "5m", "15m", "1h"]
+        self._recovery_task = asyncio.create_task(self._run_recovery(initial, intervals, now_ms))
+
         # 周期任务
         self._tasks = [
             asyncio.create_task(self._universe_loop()),
             asyncio.create_task(self._candidate_loop()),
             asyncio.create_task(self._compute_loop()),
         ]
-        logger.info("runtime_started universe=%d deep=%d",
-                    len(self.universe.universe), len(self.deep_scanner.symbols))
+        logger.info("runtime_started universe=%d deep=%d mode=%s",
+                    len(self.universe.universe), len(self.deep_scanner.symbols),
+                    self.system_mode.value)
+
+    async def _run_recovery(self, symbols: list[str], intervals: list[str], now_ms: int) -> None:
+        """后台执行停机恢复（不阻塞 server 启动）。"""
+        try:
+            self.recovery_report = await self.recovery_manager.recover(symbols, intervals, now_ms)
+            self.system_mode = self.recovery_report.mode
+            logger.info("recovery mode=%s tier=%s downtime=%.1fs backfilled=%d loaded=%d",
+                        self.system_mode.value, self.recovery_report.tier,
+                        self.recovery_report.downtime_s, self.recovery_report.klines_backfilled,
+                        self.recovery_report.klines_loaded)
+        except Exception:
+            logger.exception("recovery_failed")
 
     async def stop(self) -> None:
         self._running = False
@@ -725,12 +902,17 @@ class MarketRadarRuntime:
         self._tasks = []
         await self.deep_scanner.set_symbols([])
         await self.rate_limiter.close()
+        self.repository.close()
 
     async def _universe_loop(self) -> None:
         while self._running:
             try:
                 await asyncio.sleep(self.cfg.app.candidate_refresh_interval_s)
                 await self.universe.refresh()
+                # V1.2 §9 刷新现货注册表
+                if self.cfg.app.enable_spot:
+                    await self.spot_registry.fetch_from_api(
+                        self.cfg.app.spot_rest_base_url, proxy=self.cfg.app.proxy)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -807,11 +989,93 @@ class MarketRadarRuntime:
                 now = self.clock.now_ms()
                 for sym in self.deep_scanner.symbols:
                     self._compute_symbol(sym, now)
+                # V1.2 §8 市场背景（每轮计算，开销小）
+                self._compute_market_regime(now)
+                # V1.2 模式提升：RECOVERY→WARMUP→LIVE
+                self._promote_mode(now)
                 await asyncio.sleep(self.cfg.app.deep_compute_interval_s)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("compute_loop_error")
+
+    def _promote_mode(self, now_ms: int) -> None:
+        """根据实时样本积累提升系统模式。"""
+        if self.system_mode == SystemMode.LIVE:
+            return
+        # 统计 deep symbols 的主窗口样本数
+        sample_counts = []
+        for sym in self.deep_scanner.symbols:
+            fe_state = self.feature_engine.get_state(sym)
+            sample_counts.append(len(fe_state.baseline_volumes))
+        max_samples = max(sample_counts) if sample_counts else 0
+        live_min = self.cfg.recovery.live_min_samples
+
+        if self.system_mode == SystemMode.RECOVERY:
+            # 实时资金流恢复（有样本） → WARMUP
+            if max_samples > 0:
+                self.system_mode = SystemMode.WARMUP
+                logger.info("mode_promoted RECOVERY→WARMUP samples=%d", max_samples)
+        if self.system_mode == SystemMode.WARMUP:
+            if max_samples >= live_min:
+                self.system_mode = SystemMode.LIVE
+                logger.info("mode_promoted WARMUP→LIVE samples=%d", max_samples)
+
+    @property
+    def is_live(self) -> bool:
+        return self.system_mode == SystemMode.LIVE
+
+    def _compute_market_regime(self, now_ms: int) -> None:
+        """构建市场横截面快照并判定 regime（V1.2 §8）。"""
+        # breadth from universe tickers
+        up = down = 0
+        for sym, tk in self.universe.tickers.items():
+            pct = tk.get("price_change_pct", 0.0)
+            if pct > 0:
+                up += 1
+            elif pct < 0:
+                down += 1
+        universe_size = len(self.universe.universe) or 1
+        anomaly_ratio = len(self.candidates) / universe_size if universe_size else 0.0
+
+        # OI 扩张/收缩 from deep symbols
+        oi_expand = oi_contract = 0
+        for sym in self.deep_scanner.symbols:
+            st = self.latest_state.get(sym)
+            if st is None:
+                continue
+            oi_5m = st.features.get("oi_change_5m")
+            if oi_5m is None:
+                continue
+            if oi_5m > 0:
+                oi_expand += 1
+            elif oi_5m < 0:
+                oi_contract += 1
+        deep_n = len(self.deep_scanner.symbols) or 1
+        oi_exp_ratio = oi_expand / deep_n
+        oi_con_ratio = oi_contract / deep_n
+
+        # BTC/ETH returns from deep features（若在 deep set）
+        def _ctx_ret(sym: str, iv: str) -> float | None:
+            st = self.latest_state.get(sym)
+            if st is None:
+                return None
+            return st.features.get(f"context_{iv}")
+
+        snap = MarketSnapshot(
+            btc_return_5m=_ctx_ret("BTCUSDT", "5m"),
+            btc_return_15m=_ctx_ret("BTCUSDT", "15m"),
+            btc_return_1h=_ctx_ret("BTCUSDT", "1h"),
+            eth_return_5m=_ctx_ret("ETHUSDT", "5m"),
+            eth_return_15m=_ctx_ret("ETHUSDT", "15m"),
+            eth_return_1h=_ctx_ret("ETHUSDT", "1h"),
+            breadth_up=up,
+            breadth_down=down,
+            anomaly_ratio=anomaly_ratio,
+            oi_expansion_ratio=oi_exp_ratio,
+            oi_contraction_ratio=oi_con_ratio,
+        )
+        self.market_regime = self.market_regime_engine.compute(snap)
 
     def _sync_connected(self) -> None:
         """把 collector 实际连接状态同步到 watchdog。"""
@@ -870,7 +1134,8 @@ class MarketRadarRuntime:
             st.last_transition_at = le.asof
 
         # 4.5 评分 + 置信度 + 翻译（V1.1）
-        sample_count = len(self.feature_engine.get_state(symbol).baseline_volumes)
+        fe_state = self.feature_engine.get_state(symbol)
+        sample_count = len(fe_state.baseline_volumes)
         score_bd = self.score_engine.compute(
             snap=snap,
             state=st.state,
@@ -884,24 +1149,129 @@ class MarketRadarRuntime:
         st.score_available = score_bd.available
         st.score_breakdown = score_bd.to_dict()
 
-        conf_bd = self.confidence_engine.compute(
+        conf_bd = self.data_confidence_engine.compute(
             confidence_state=confidence,
             snap=snap,
-            evidence_count=st.evidence_count,
             sample_count=sample_count,
+            spot_available=fe_state.spot_available,
         )
-        st.confidence = conf_bd.confidence
-        st.confidence_available = conf_bd.available
-        st.confidence_breakdown = conf_bd.to_dict()
+        st.data_confidence = conf_bd.score
+        st.data_confidence_available = conf_bd.available
+        st.data_confidence_breakdown = conf_bd.to_dict()
+
+        # 信号确认度（V1.2 §3.2）— 后续 Phase 注入 breakout_hold/retest/spot_agreement
+        accept_fv = snap.features.get("acceptance")
+        spot_agree_fv = snap.features.get("spot_perp_agreement")
+        conf_ctx = ConfirmationContext(
+            direction=st.direction.value if st.direction else None,
+            evidence_count=st.evidence_count,
+            veto_count=st.veto_count,
+            breakout_acceptance=accept_fv.value if (accept_fv and accept_fv.available) else None,
+            spot_perp_agreement=spot_agree_fv.value if (spot_agree_fv and spot_agree_fv.available) else None,
+        )
+        sig_bd = self.signal_confirmation_engine.compute(
+            snap=snap,
+            ctx=conf_ctx,
+            sample_count=sample_count,
+            data_confidence_score=conf_bd.score if conf_bd.available else None,
+        )
+        st.signal_confirmation = sig_bd.score
+        st.signal_confirmation_available = sig_bd.available
+        st.signal_confirmation_breakdown = sig_bd.to_dict()
 
         # stale_flag
         stale_fv = snap.features.get("stale_flag")
         st.stale_flag = stale_fv.value if stale_fv and stale_fv.available else 0.0
 
+        # ── V1.2 行为引擎 ──
+        fv_dict = {k: (v.value if v.available else None) for k, v in snap.features.items()}
+        current_price = self.universe.get_ticker(symbol).get("last_price", 0.0)
+
+        # 结构 + VP（from kline history）
+        klines_15m = self.feature_engine.get_kline_history(symbol, "15m")
+        struct = self.structure_engine.compute(klines_15m, current_price=current_price)
+        vp = self.volume_profile_engine.compute(klines_15m)
+
+        # 吸筹 / 派发 / 复活 / 冲量 / Pump
+        accum = self.accumulation_engine.compute(fv_dict, st.direction.value if st.direction else None)
+        dist = self.distribution_engine.compute(fv_dict, st.direction.value if st.direction else None)
+        revival = self.dormant_revival_engine.compute(fv_dict)
+        impulse = self.impulse_engine.compute(fv_dict)
+        pump = self.pump_risk_engine.compute(fv_dict)
+
+        st.accumulation_score = accum.accumulation_score
+        st.distribution_risk = dist.distribution_risk_score
+        st.revival_score = revival.revival_score
+        st.impulse_label = impulse.label
+        st.pump_risk = pump.pump_risk_score
+
+        # Spot×Perp
+        spot_perp = self.spot_perp_engine.compute(fv_dict, st.direction.value if st.direction else None)
+        st.spot_perp_label = spot_perp.label
+
+        # Setup Type
+        setup = self.setup_type_engine.compute(
+            st.state, st.direction.value if st.direction else None, fv_dict,
+            accumulation_score=accum.accumulation_score,
+            distribution_risk=dist.distribution_risk_score,
+            revival_score=revival.revival_score,
+            leverage_dominant=spot_perp.leverage_dominant,
+            spot_confirmed=spot_perp.spot_confirmed,
+        )
+        st.setup_type = setup.setup_type
+        st.setup_label = setup.label
+
+        # 突破生命周期
+        kline_5m_state = self.feature_engine.get_state(symbol).klines.get("5m")
+        breakout = self.breakout_lifecycle_engine.update(
+            symbol, now,
+            breakout_level=struct.breakout_level,
+            current_price=current_price or None,
+            kline_5m=kline_5m_state,
+            context_15m=fv_dict.get("context_15m"),
+            context_1h=fv_dict.get("context_1h"),
+            fv=fv_dict,
+        )
+
+        # 位置
+        location = self.location_engine.compute(current_price or None, fv_dict,
+                                                structure=struct, volume_profile=vp)
+        st.location_label = location.label
+
+        # 趋势
+        trend = self.trend_engine.compute(fv_dict, klines=klines_15m, structure=struct)
+        st.trend_score = trend.trend_score
+        st.trend_label = trend.label
+
+        # Trade Plan（START_CONFIRMED 时冻结）
+        plan = self.trade_plan_engine.compute(
+            current_price or None,
+            st.direction.value if st.direction else None,
+            structure=struct, volume_profile=vp, atr=struct.atr,
+        )
+        if st.state == State.START_CONFIRMED and not st.trade_plan.get("frozen"):
+            self.trade_plan_engine.freeze(plan, now)
+            self.repository.save_trade_plan(symbol, now, plan.to_dict())
+        if st.trade_plan.get("frozen") and not plan.frozen:
+            plan.frozen = True
+            plan.frozen_at_ms = st.trade_plan.get("frozen_at_ms")
+        st.trade_plan = plan.to_dict()
+
+        # 评分（注入 pump_risk）
+        score_bd = self.score_engine.compute(
+            snap=snap, state=st.state,
+            direction=st.direction.value if st.direction else None,
+            evidence_count=st.evidence_count,
+            state_since_ms=st.state_since_ms, now_ms=now,
+            sample_count=sample_count,
+            setup_type=st.setup_type,
+            pump_risk_score=st.pump_risk,
+        )
+
         # 一句话结论
         st.summary = PresentationTranslator.generate_summary(
             st.state, st.direction.value if st.direction else None,
-            score_bd, conf_bd,
+            score_bd, conf_bd, sig_bd,
         )
 
         # 5. 真实 transition → 存 last_transition + history
@@ -916,8 +1286,23 @@ class MarketRadarRuntime:
             if event.evidence or event.vetoes:
                 st.last_transition_at = event.asof
             st.state_since_ms = now
-            # Alerts（仅消费 AnalysisEvent）
-            self.alerts.process_event(event, now)
+            # V1.2 持久化信号
+            self.repository.save_analysis_event(event)
+            # Alerts（仅消费 AnalysisEvent；非 LIVE 期不发正式推送）
+            if self.system_mode == SystemMode.LIVE:
+                self.alerts.process_event(event, now)
+                # V1.2 §37 State Transition Push
+                push = self.alerts.build_push(
+                    event,
+                    opportunity_score=st.opportunity_score if st.score_available else None,
+                    signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
+                    data_confidence=st.data_confidence if st.data_confidence_available else None,
+                    setup_type=st.setup_type,
+                    trade_plan=st.trade_plan or None,
+                    one_line=st.summary,
+                )
+                if push:
+                    self.push_history.append(push.to_dict())
             logger.info(
                 "[transition] %s %s→%s %s evid=%d veto=%d",
                 symbol, event.previous_state.value, event.new_state.value,
@@ -949,12 +1334,34 @@ class MarketRadarRuntime:
                 "confidence_state_label": PresentationTranslator.confidence_label(s.confidence_state),
                 "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
                 "score_available": s.score_available,
-                "confidence": round(s.confidence, 4) if s.confidence_available else None,
-                "confidence_pct": round(s.confidence * 100, 1) if s.confidence_available else None,
-                "confidence_available": s.confidence_available,
+                "data_confidence": round(s.data_confidence, 1) if s.data_confidence_available else None,
+                "data_confidence_pct": round(s.data_confidence, 1) if s.data_confidence_available else None,
+                "data_confidence_available": s.data_confidence_available,
+                "data_confidence_breakdown": s.data_confidence_breakdown,
+                "signal_confirmation": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
+                "signal_confirmation_pct": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
+                "signal_confirmation_available": s.signal_confirmation_available,
+                "signal_confirmation_breakdown": s.signal_confirmation_breakdown,
+                # deprecated aliases (V1.1) → 映射到 data_confidence，P20 移除
+                "confidence": round(s.data_confidence / 100.0, 4) if s.data_confidence_available else None,
+                "confidence_pct": round(s.data_confidence, 1) if s.data_confidence_available else None,
+                "confidence_available": s.data_confidence_available,
                 "summary": s.summary,
                 "price_change_24h": s.price_change_24h,
                 "quote_volume_24h": s.quote_volume_24h,
+                "current_price": self.universe.get_ticker(s.symbol).get("last_price", 0.0),
+                # V1.2 引擎结果
+                "setup_type": s.setup_type,
+                "setup_label": s.setup_label,
+                "accumulation_score": s.accumulation_score,
+                "distribution_risk": s.distribution_risk,
+                "revival_score": s.revival_score,
+                "impulse_label": s.impulse_label,
+                "spot_perp_label": s.spot_perp_label,
+                "location_label": s.location_label,
+                "trend_score": s.trend_score,
+                "trend_label": s.trend_label,
+                "pump_risk": s.pump_risk,
                 "evidence_count": s.evidence_count,
                 "veto_count": s.veto_count,
                 "stale_flag": s.stale_flag,
@@ -1011,10 +1418,20 @@ class MarketRadarRuntime:
             "opportunity_score": round(s.opportunity_score, 1) if s.score_available else None,
             "score_available": s.score_available,
             "score_breakdown": s.score_breakdown,
-            "confidence": round(s.confidence, 4) if s.confidence_available else None,
-            "confidence_pct": round(s.confidence * 100, 1) if s.confidence_available else None,
-            "confidence_available": s.confidence_available,
-            "confidence_breakdown": s.confidence_breakdown,
+            # V1.2 评分（§3-4）
+            "data_confidence": round(s.data_confidence, 1) if s.data_confidence_available else None,
+            "data_confidence_pct": round(s.data_confidence, 1) if s.data_confidence_available else None,
+            "data_confidence_available": s.data_confidence_available,
+            "data_confidence_breakdown": s.data_confidence_breakdown,
+            "signal_confirmation": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
+            "signal_confirmation_pct": round(s.signal_confirmation, 1) if s.signal_confirmation_available else None,
+            "signal_confirmation_available": s.signal_confirmation_available,
+            "signal_confirmation_breakdown": s.signal_confirmation_breakdown,
+            # deprecated aliases (V1.1) → data_confidence
+            "confidence": round(s.data_confidence / 100.0, 4) if s.data_confidence_available else None,
+            "confidence_pct": round(s.data_confidence, 1) if s.data_confidence_available else None,
+            "confidence_available": s.data_confidence_available,
+            "confidence_breakdown": s.data_confidence_breakdown,
             "summary": s.summary,
             "stale_flag": s.stale_flag,
             # 翻译模块
@@ -1023,6 +1440,19 @@ class MarketRadarRuntime:
             "false_start_check": false_start,
             "timeline": timeline_translated,
             "subscore_labels": PresentationTranslator.subscore_labels(),
+            # V1.2 引擎详情
+            "setup_type": s.setup_type,
+            "setup_label": s.setup_label,
+            "trade_plan": s.trade_plan,
+            "accumulation_score": s.accumulation_score,
+            "distribution_risk": s.distribution_risk,
+            "revival_score": s.revival_score,
+            "impulse_label": s.impulse_label,
+            "spot_perp_label": s.spot_perp_label,
+            "location_label": s.location_label,
+            "trend_score": s.trend_score,
+            "trend_label": s.trend_label,
+            "pump_risk": s.pump_risk,
         }
 
     def get_health(self) -> list[dict[str, Any]]:
@@ -1115,22 +1545,58 @@ class MarketRadarRuntime:
         }
 
     def get_top10(self) -> list[dict[str, Any]]:
-        """Top10 排名 — 按 RankingScore 排序。"""
+        """Top10 排名 — 按 RankingScore 排序 + 排名滞回（V1.2 §6.4）。
+
+        V1.2：非 LIVE 模式（RECOVERY/WARMUP）不产出强确认 Top10。
+        """
+        if not self.is_live:
+            return []
         radar = self.get_radar()
-        return rank_symbols(radar, top_n=10)
+        ranked = rank_symbols(radar, top_n=10)
+        now_ms = self.clock.now_ms()
+        return self.ranking_hysteresis.update(ranked, now_ms)
+
+    def get_prices(self) -> dict[str, float]:
+        """轻量价格快照（供前端 1-2s 轮询当前价）。"""
+        prices: dict[str, float] = {}
+        for sym in self.deep_scanner.symbols:
+            tk = self.universe.get_ticker(sym)
+            lp = tk.get("last_price", 0.0)
+            if lp:
+                prices[sym] = lp
+        return prices
 
     def get_market_summary(self) -> dict[str, Any]:
         """市场总览 — 系统结论 + 统计。"""
         top10 = self.get_top10()
         stats = self.get_stats()
+        if not self.is_live:
+            mode_label = {
+                SystemMode.RECOVERY: "系统恢复中（补历史/重建结构）",
+                SystemMode.WARMUP: "系统预热中（OI/CVD/Delta 基线建立中）",
+            }.get(self.system_mode, "系统启动中")
+            return {
+                "conclusion": f"{mode_label}，暂不产出强确认 Top10 与正式推送。",
+                "system_mode": self.system_mode.value,
+                "market_regime": self.market_regime.to_dict() if self.market_regime else None,
+                "data_status": stats.get("data_status", "未知"),
+                "universe_size": stats.get("universe_size", 0),
+                "candidate_count": stats.get("candidate_count", 0),
+                "state_counts": stats.get("state_counts", {}),
+                "top10": [],
+                "recovery": _recovery_dict(self.recovery_report),
+            }
         conclusion = generate_system_conclusion(top10, stats.get("candidate_count", 0))
         return {
             "conclusion": conclusion,
+            "system_mode": self.system_mode.value,
+            "market_regime": self.market_regime.to_dict() if self.market_regime else None,
             "data_status": stats.get("data_status", "未知"),
             "universe_size": stats.get("universe_size", 0),
             "candidate_count": stats.get("candidate_count", 0),
             "state_counts": stats.get("state_counts", {}),
             "top10": top10,
+            "recovery": _recovery_dict(self.recovery_report),
         }
 
 
@@ -1143,3 +1609,17 @@ def _ev_dict(e) -> dict[str, Any]:
 
 def _veto_dict(v) -> dict[str, Any]:
     return {"type": v.type.value, "triggered": v.triggered, "severity": v.severity.value, "detail": v.detail}
+
+
+def _recovery_dict(report: RecoveryReport | None) -> dict[str, Any]:
+    if report is None:
+        return {}
+    return {
+        "fresh_start": report.fresh_start,
+        "downtime_s": round(report.downtime_s, 1),
+        "tier": report.tier,
+        "klines_backfilled": report.klines_backfilled,
+        "klines_loaded": report.klines_loaded,
+        "trade_plans_expired": report.trade_plans_expired,
+        "notes": list(report.notes),
+    }

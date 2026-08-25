@@ -14,6 +14,7 @@ from .enums import (
     HealthLevel,
     KlineInterval,
     State,
+    SystemMode,
     VetoSeverity,
     VetoType,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "HealthLevel",
     "KlineInterval",
     "State",
+    "SystemMode",
     "VetoSeverity",
     "VetoType",
     # events

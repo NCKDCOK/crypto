@@ -1,10 +1,12 @@
 """Top10 Ranking — 按 RankingScore 排名。
 
-依据：V1.1 计划 §十六
-- RankingScore = OpportunityScore × ConfidenceFactor
+依据：V1.1 计划 §十六, V1.2 计划 §二十六
+V1.2: RankingScore = OpportunityScore × SignalConfirmation × DataConfidence
+- 三个分独立相乘（机会 × 确认 × 可信）
 - 首页 Top10 按 RankingScore 排
-- 用户只看到 机会分 + 置信度，不显示 RankingScore
+- 用户只看到 机会分 / 信号确认 / 数据可信，不显示 RankingScore
 - UNKNOWN / stale symbol 不进入 Top10
+- V1.2 §6.4: 排名滞回由 RankingHysteresis 维护（P3），本函数仅做无状态打分排序
 """
 
 from __future__ import annotations
@@ -14,9 +16,16 @@ from typing import Any
 from src.domain import ConfidenceState, State
 
 
-def compute_ranking_score(opportunity_score: float, confidence: float) -> float:
-    """RankingScore = OpportunityScore × ConfidenceFactor。"""
-    return opportunity_score * confidence
+def compute_ranking_score(
+    opportunity_score: float,
+    signal_confirmation: float,
+    data_confidence: float,
+) -> float:
+    """RankingScore = Opportunity × (SignalConf/100) × (DataConf/100)。
+
+    三者范围均为 0~100。结果为 0~100 的可排序标量。
+    """
+    return opportunity_score * (signal_confirmation / 100.0) * (data_confidence / 100.0)
 
 
 def rank_symbols(
@@ -28,7 +37,8 @@ def rank_symbols(
     排除规则：
     - confidence_state == UNKNOWN → 不进入 Top10
     - 评分不可用 (score_available == False) → 不进入 Top10
-    - stale (stale_flag == 1) → 不进入高置信 Top10
+    - stale (stale_flag == 1) → 不进入 Top10
+    - data_confidence / signal_confirmation 缺失 → 不进入 Top10
     """
     eligible = []
     for s in symbols:
@@ -44,8 +54,17 @@ def rank_symbols(
             continue
 
         opp = s.get("opportunity_score", 0) or 0
-        conf = s.get("confidence", 0) or 0
-        ranking = compute_ranking_score(opp, conf)
+        sc = s.get("signal_confirmation")
+        dc = s.get("data_confidence")
+        # 兼容：V1.1 旧字段 confidence(0~1) → 映射为 data_confidence
+        if dc is None:
+            dc = (s.get("confidence", 0) or 0) * 100.0
+        if sc is None:
+            sc = dc  # 信号确认缺失时退化为数据可信（保守）
+        if dc is None or sc is None:
+            continue
+
+        ranking = compute_ranking_score(opp, sc, dc)
         eligible.append({**s, "ranking_score": ranking})
 
     # 按 RankingScore 降序

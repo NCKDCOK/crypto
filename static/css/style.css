@@ -885,3 +885,52 @@ td.clickable { cursor: pointer; }
 .mt-md { margin-top: var(--space-md); }
 .mb-md { margin-bottom: var(--space-md); }
 .mb-lg { margin-bottom: var(--space-lg); }
+
+/* ── V1.2 §28 Side Drawer ── */
+.side-drawer {
+  position: fixed; top: 0; right: 0; height: 100vh; width: 480px; max-width: 90vw;
+  background: var(--bg-card); border-left: 1px solid var(--border);
+  transform: translateX(100%); transition: transform 0.3s cubic-bezier(0.4,0,0.2,1);
+  z-index: 1000; overflow-y: auto; padding: 16px; box-shadow: -4px 0 24px rgba(0,0,0,0.3);
+}
+.side-drawer.open { transform: translateX(0); }
+.drawer-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 999;
+  opacity: 0; pointer-events: none; transition: opacity 0.3s;
+}
+.drawer-overlay.show { opacity: 1; pointer-events: auto; }
+.drawer-loading { padding: 40px; text-align: center; color: var(--text-muted); }
+.drawer-section { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--border); }
+.drawer-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.drawer-symbol { font-size: 1.3rem; font-weight: 700; color: var(--accent); }
+.drawer-close { background: none; border: none; color: var(--text-muted); font-size: 1.2rem; cursor: pointer; }
+.drawer-price-row { display: flex; gap: 12px; align-items: baseline; margin-bottom: 8px; }
+.drawer-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.drawer-scores { display: flex; gap: 16px; margin-bottom: 8px; font-size: 0.85rem; }
+.drawer-summary { font-size: 0.85rem; color: var(--text); line-height: 1.5; }
+.drawer-title { font-size: 0.8rem; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; }
+.drawer-tp > div { display: flex; justify-content: space-between; padding: 3px 0; font-size: 0.8rem; }
+.drawer-plan-reason { font-size: 0.8rem; margin-top: 8px; padding: 8px; background: var(--bg); border-radius: 6px; }
+.drawer-plan-reason.warn { color: var(--short); }
+.drawer-flow { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.flow-item { font-size: 0.78rem; display: flex; justify-content: space-between; }
+.flow-item.full { grid-column: 1 / -1; }
+.evidence-vote { font-size: 0.8rem; padding: 8px; background: var(--bg); border-radius: 6px; }
+.strong-confirm { color: var(--long); font-weight: 600; margin-top: 6px; font-size: 0.8rem; }
+
+/* V1.2 §36 市场背景横幅 */
+.regime-banner {
+  padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: 8px; margin-bottom: 12px; font-size: 0.85rem;
+}
+.regime-label { color: var(--text-muted); }
+.regime-value { font-weight: 600; color: var(--accent); }
+.recovery-banner {
+  padding: 8px 14px; background: rgba(255,180,0,0.1); border: 1px solid rgba(255,180,0,0.3);
+  border-radius: 8px; margin-bottom: 12px; font-size: 0.8rem; color: #ffb400;
+}
+.badge-setup { background: rgba(100,200,255,0.15); color: #64c8ff; border: 1px solid rgba(100,200,255,0.3); }
+
+@media (max-width: 768px) {
+  .side-drawer { width: 100vw; }
+}

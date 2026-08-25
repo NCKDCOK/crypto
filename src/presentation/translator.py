@@ -25,7 +25,8 @@ from src.domain import (
     VetoType,
 )
 from src.scoring.engine import ScoreBreakdown, SubScore
-from src.scoring.confidence import ConfidenceBreakdown
+from src.scoring.data_confidence import DataConfidenceBreakdown
+from src.scoring.signal_confirmation import SignalConfirmationBreakdown
 
 # ── 状态映射 ──
 STATE_LABELS: dict[str, str] = {
@@ -221,9 +222,14 @@ class PresentationTranslator:
         state: str | State,
         direction: str | None,
         score: ScoreBreakdown | None,
-        confidence: ConfidenceBreakdown | None,
+        data_confidence: DataConfidenceBreakdown | None = None,
+        signal_confirmation: SignalConfirmationBreakdown | None = None,
     ) -> str:
-        """生成用户能看懂的一句话结论。"""
+        """生成用户能看懂的一句话结论。
+
+        V1.2：data_confidence（数据可信）/ signal_confirmation（信号确认度）
+        仅作为「确认度」语境提示，绝不表述为「胜率」。
+        """
         s = state.value if isinstance(state, State) else str(state)
         state_label = PresentationTranslator.state_label(s)
 
@@ -253,6 +259,8 @@ class PresentationTranslator:
                 wr = subs.get("withdrawal_risk")
                 if wr and wr.score < 30:
                     parts.append("暂无撤离迹象")
+            if signal_confirmation and signal_confirmation.available and signal_confirmation.strong_confirm:
+                parts.append("证据强确认")
             if not parts:
                 parts.append("启动信号已确认")
             return f"属于{dir_label}启动阶段，{'，'.join(parts)}。"

@@ -119,3 +119,36 @@ class TestFeatureEngineSnapshot:
         snap = engine.compute_snapshot("BTCUSDT", 2000)
         assert snap.features["price_return_5s"].available
         assert snap.features["price_return_5s"].value > 0
+
+
+class TestSpotFeatures:
+    """V1.2 §9 Spot 数据特征。"""
+
+    def test_spot_unavailable_when_no_market(self):
+        eng = FeatureEngine()
+        eng.set_spot_available("BTCUSDT", False)
+        snap = eng.compute_snapshot("BTCUSDT", 1000)
+        assert snap.features["spot_volume"].available is False
+        assert snap.features["spot_cvd"].available is False
+        assert snap.features["spot_perp_agreement"].available is False
+
+    def test_spot_features_when_available(self):
+        eng = FeatureEngine()
+        eng.set_spot_available("BTCUSDT", True)
+        eng.add_spot_trade("BTCUSDT", _trade(1, "100", "2", AggressorSide.BUY, 1000))
+        eng.add_spot_trade("BTCUSDT", _trade(2, "101", "1", AggressorSide.BUY, 1100))
+        eng.add_trade("BTCUSDT", _trade(3, "100", "1", AggressorSide.BUY, 1050))
+        snap = eng.compute_snapshot("BTCUSDT", 1500)
+        assert snap.features["spot_volume"].available is True
+        assert snap.features["spot_volume"].value is not None
+        assert snap.features["spot_cvd"].available is True
+        # spot delta > 0, perp delta > 0 → agreement = 1
+        assert snap.features["spot_perp_agreement"].value == 1.0
+
+    def test_spot_perp_disagreement(self):
+        eng = FeatureEngine()
+        eng.set_spot_available("BTCUSDT", True)
+        eng.add_spot_trade("BTCUSDT", _trade(1, "100", "2", AggressorSide.SELL, 1000))
+        eng.add_trade("BTCUSDT", _trade(2, "100", "1", AggressorSide.BUY, 1050))
+        snap = eng.compute_snapshot("BTCUSDT", 1500)
+        assert snap.features["spot_perp_agreement"].value == -1.0

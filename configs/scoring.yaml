@@ -22,10 +22,29 @@ risk_penalty_scale: 0.4     # 风险分对机会分的扣减比例
 # 评分预热
 warmup_min_samples: 10      # 最小样本数才开始评分
 
-# 置信度因子
-confidence_base: 0.95
-confidence_missing_source_penalty: 0.15
-confidence_stale_penalty: 0.30
-confidence_degraded_penalty: 0.10
-confidence_low_evidence_penalty: 0.08
-confidence_min_evidence: 3
+# ── Data Confidence / 数据可信度（V1.2 §3.3）──
+# NOTE: uncalibrated 初值，待 Replay Calibration（P23）校准。
+# 只评估数据完整/新鲜/稳定，不是历史胜率。
+data_confidence_base: 100.0
+data_confidence_unknown_penalty: 40.0   # 关键流 STALE/FAIL（须低于 strong_confirm 门 70）
+data_confidence_degraded_penalty: 10.0
+data_confidence_stale_penalty: 15.0     # stale_flag 命中
+data_confidence_missing_oi_penalty: 15.0
+data_confidence_missing_funding_penalty: 5.0
+data_confidence_missing_kline_penalty: 8.0
+data_confidence_missing_spot_penalty: 5.0
+data_confidence_queue_lag_penalty: 5.0
+data_confidence_queue_lag_penalty_ms: 2000.0
+
+# ── Signal Confirmation / 信号确认度（V1.2 §3.2）──
+# NOTE: uncalibrated 初值，待 Replay Calibration（P23）校准。
+# 评估判断证据确认程度，不是历史成功率。UI 标「确认度」非「胜率」。
+sc_core_weight: 0.45          # 核心证据
+sc_supporting_weight: 0.25    # 辅助证据
+sc_veto_weight: 0.15          # False Start Veto
+sc_multitf_weight: 0.15       # 多周期一致性
+sc_volume_z_threshold: 2.0
+sc_acceptance_threshold: 0.5
+sc_retrace_healthy: 0.4
+sc_spot_agreement_threshold: 0.3
+sc_strong_confirm_min_dc: 70.0  # 强确认所需最低 data_confidence

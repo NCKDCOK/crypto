@@ -21,10 +21,13 @@ const State = {
   signalsData: [],
   top10Data: [],
   summaryData: {},
+  pricesData: {},
   detailCache: {},
   detailSymbol: null,
   loading: true,
   previewSymbol: null,
+  // V1.2 §6.3 子评分更新节流：仅当变化 >3 或状态变化才重渲染卡片
+  lastRendered: {}, // symbol → { state, direction, opp, scores... }
 };
 
 // ═══════════════════════════════════════
@@ -174,10 +177,26 @@ function renderHome(view) {
 
   let html = '';
 
+  // V1.2 §36 市场背景横幅
+  const regime = summary.market_regime;
+  if (regime) {
+    html += `<div class="regime-banner">
+      <span class="regime-label">市场背景：</span>
+      <span class="regime-value">${escapeHtml(regime.label)} · ${escapeHtml(regime.detail || '')}</span>
+    </div>`;
+  }
+
+  // V1.2 恢复状态
+  if (summary.system_mode && summary.system_mode !== 'LIVE') {
+    html += `<div class="recovery-banner">${escapeHtml(summary.conclusion || '')}</div>`;
+  }
+
   // 系统结论
   const conclusion = summary.conclusion || '当前无确认启动机会，建议等待。';
   const hasOpportunity = top10.some(s => s.state === 'START_CONFIRMED' || s.state === 'CONTINUATION');
-  html += `<div class="conclusion ${hasOpportunity ? '' : 'empty'}">${escapeHtml(conclusion)}</div>`;
+  if (summary.system_mode === 'LIVE' || !summary.system_mode) {
+    html += `<div class="conclusion ${hasOpportunity ? '' : 'empty'}">${escapeHtml(conclusion)}</div>`;
+  }
 
   // 统计栏
   html += renderSummaryBar(stats);
@@ -203,6 +222,13 @@ function renderHome(view) {
   }
 
   view.innerHTML = html;
+
+  // V1.2 §6.3 快照本次渲染，供下次节流比较
+  State.lastRendered.top10 = top10.map(s => ({
+    symbol: s.symbol, state: s.state, direction: s.direction,
+    opportunity_score: s.opportunity_score,
+    signal_confirmation_pct: s.signal_confirmation_pct,
+  }));
 
   // 异步加载 preview
   if (State.previewSymbol) {
@@ -233,7 +259,9 @@ function renderHeroCard(s) {
   const dir = s.direction || '';
   const dirClass = dir === 'LONG' ? 'long' : (dir === 'SHORT' ? 'short' : '');
   const oppScore = s.opportunity_score;
-  const confPct = s.confidence_pct;
+  const dcPct = s.data_confidence_pct != null ? s.data_confidence_pct : s.confidence_pct;
+  const scPct = s.signal_confirmation_pct;
+  const price = State.pricesData[s.symbol] || s.current_price;
 
   let scoreBars = '';
   const labels = {
@@ -278,12 +306,20 @@ function renderHeroCard(s) {
       <div class="hero-body">
         <div class="hero-scores">
           <div class="score-row">
+            <span class="label">当前价</span>
+            <span class="value font-mono" data-price-symbol="${s.symbol}">${fmtPrice(price)}</span>
+          </div>
+          <div class="score-row">
             <span class="label">机会分</span>
             <span class="value big text-accent">${oppScore != null ? fmt(oppScore, 1) : '-'}</span>
           </div>
           <div class="score-row">
-            <span class="label">置信度</span>
-            <span class="value">${confPct != null ? fmt(confPct, 0) + '%' : '-'}</span>
+            <span class="label">信号确认</span>
+            <span class="value">${scPct != null ? fmt(scPct, 0) + '%' : '-'}</span>
+          </div>
+          <div class="score-row">
+            <span class="label">数据可信</span>
+            <span class="value">${dcPct != null ? fmt(dcPct, 0) + '%' : '-'}</span>
           </div>
           <div style="margin-top:8px">${scoreBars}</div>
         </div>
@@ -300,7 +336,9 @@ function renderCard(s, rank) {
   const dir = s.direction || '';
   const dirClass = dir === 'LONG' ? 'long' : (dir === 'SHORT' ? 'short' : '');
   const oppScore = s.opportunity_score;
-  const confPct = s.confidence_pct;
+  const dcPct = s.data_confidence_pct != null ? s.data_confidence_pct : s.confidence_pct;
+  const scPct = s.signal_confirmation_pct;
+  const price = State.pricesData[s.symbol] || s.current_price;
 
   let scoreBars = '';
   const labels = {
@@ -329,11 +367,13 @@ function renderCard(s, rank) {
         </div>
       </div>
       <div class="card-price">
+        <span class="font-mono" data-price-symbol="${s.symbol}">${fmtPrice(price)}</span>
         ${fmtPct(s.price_change_24h)} <span class="${pctColor(s.price_change_24h)}" style="font-size:0.7rem">24h</span>
       </div>
       <div style="display:flex;gap:12px;margin-bottom:4px">
-        <span style="font-size:0.72rem;color:var(--text-muted)">机会分 <span class="text-accent font-mono" style="font-weight:700">${oppScore != null ? fmt(oppScore, 1) : '-'}</span></span>
-        <span style="font-size:0.72rem;color:var(--text-muted)">置信度 <span class="font-mono" style="font-weight:600">${confPct != null ? fmt(confPct, 0) + '%' : '-'}</span></span>
+        <span style="font-size:0.72rem;color:var(--text-muted)">机会 <span class="text-accent font-mono" style="font-weight:700">${oppScore != null ? fmt(oppScore, 1) : '-'}</span></span>
+        <span style="font-size:0.72rem;color:var(--text-muted)">确认 <span class="font-mono" style="font-weight:600">${scPct != null ? fmt(scPct, 0) + '%' : '-'}</span></span>
+        <span style="font-size:0.72rem;color:var(--text-muted)">可信 <span class="font-mono" style="font-weight:600">${dcPct != null ? fmt(dcPct, 0) + '%' : '-'}</span></span>
       </div>
       ${scoreBars}
       <div class="card-summary">${escapeHtml(s.summary || '')}</div>
@@ -341,13 +381,150 @@ function renderCard(s, rank) {
 }
 
 function selectSymbol(symbol) {
-  // 在首页：显示 preview；在其他页面：跳转详情
-  if (State.currentPage === 'home') {
-    State.previewSymbol = symbol;
-    loadPreview(symbol);
-  } else {
-    navigate('/symbol/' + symbol);
+  // V1.2 §28：从右侧 Drawer 打开，不跳页面
+  openDrawer(symbol);
+}
+
+async function openDrawer(symbol) {
+  State.selectedSymbol = symbol;
+  const drawer = document.getElementById('side-drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  if (!drawer) return;
+  drawer.classList.add('open');
+  if (overlay) overlay.classList.add('show');
+  drawer.innerHTML = '<div class="drawer-loading">加载中<span class="dots"></span></div>';
+  const detail = await API.getSymbolDetail(symbol);
+  if (!detail || detail.error) {
+    drawer.innerHTML = '<div class="drawer-loading">数据不足</div>';
+    return;
   }
+  drawer.innerHTML = renderDrawer(detail);
+}
+
+function closeDrawer() {
+  const drawer = document.getElementById('side-drawer');
+  const overlay = document.getElementById('drawer-overlay');
+  if (drawer) drawer.classList.remove('open');
+  if (overlay) overlay.classList.remove('show');
+  State.selectedSymbol = null;
+}
+
+function renderDrawer(d) {
+  const dir = d.direction || '';
+  const opp = d.opportunity_score;
+  const dc = d.data_confidence_pct;
+  const sc = d.signal_confirmation_pct;
+  let html = '';
+
+  // 第一部分：概要（§29）
+  html += `<div class="drawer-section">
+    <div class="drawer-header">
+      <span class="drawer-symbol">${d.symbol}</span>
+      <button class="drawer-close" onclick="closeDrawer()">✕</button>
+    </div>
+    <div class="drawer-price-row">
+      <span class="font-mono" style="font-size:1.2rem;font-weight:700">${fmtPrice(State.pricesData[d.symbol] || 0)}</span>
+      <span class="${pctColor(d.price_change_24h)}">${fmtPct(d.price_change_24h)}</span>
+    </div>
+    <div class="drawer-badges">
+      <span class="badge badge-state-${d.state}">${d.state_display || d.state_label || d.state}</span>
+      ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${d.direction_label || dir}</span>` : ''}
+      ${d.setup_label ? `<span class="badge badge-setup">${escapeHtml(d.setup_label)}</span>` : ''}
+    </div>
+    <div class="drawer-scores">
+      <div><span class="text-muted">机会分</span> <span class="text-accent font-mono" style="font-weight:700">${opp != null ? fmt(opp, 1) : '-'}</span></div>
+      <div><span class="text-muted">信号确认</span> <span class="font-mono" style="font-weight:600">${sc != null ? fmt(sc, 0) + '%' : '-'}</span></div>
+      <div><span class="text-muted">数据可信</span> <span class="font-mono" style="font-weight:600">${dc != null ? fmt(dc, 0) + '%' : '-'}</span></div>
+    </div>
+    <div class="drawer-summary">${escapeHtml(d.summary || '')}</div>
+  </div>`;
+
+  // Trade Plan（§29）
+  if (d.trade_plan && d.trade_plan.current_price != null) {
+    const tp = d.trade_plan;
+    html += `<div class="drawer-section">
+      <div class="drawer-title">当前计划 ${tp.frozen ? '🔒 已冻结' : ''}</div>
+      <div class="drawer-tp">
+        <div><span class="text-muted">参考关注区</span> <span class="font-mono">${tp.reference_entry_low != null ? fmtPrice(tp.reference_entry_low) : '-'} ~ ${tp.reference_entry_high != null ? fmtPrice(tp.reference_entry_high) : '-'}</span></div>
+        <div><span class="text-muted">结构失效位</span> <span class="font-mono text-short">${tp.invalidation_price != null ? fmtPrice(tp.invalidation_price) : '-'}</span></div>
+        <div><span class="text-muted">TP1</span> <span class="font-mono text-long">${tp.tp1 != null ? fmtPrice(tp.tp1) : '-'} (${tp.rr_tp1 != null ? fmt(tp.rr_tp1,1) + 'R' : '-'})</span></div>
+        <div><span class="text-muted">TP2</span> <span class="font-mono text-long">${tp.tp2 != null ? fmtPrice(tp.tp2) : '-'} (${tp.rr_tp2 != null ? fmt(tp.rr_tp2,1) + 'R' : '-'})</span></div>
+        <div><span class="text-muted">TP3</span> <span class="font-mono text-long">${tp.tp3 != null ? fmtPrice(tp.tp3) : '-'} (${tp.rr_tp3 != null ? fmt(tp.rr_tp3,1) + 'R' : '-'})</span></div>
+      </div>
+      <div class="drawer-plan-reason ${tp.chase_status !== 'ok' ? 'warn' : ''}">${escapeHtml(tp.plan_reason || '')}</div>
+    </div>`;
+  }
+
+  // 第二部分：评分（§30）
+  if (d.score_breakdown && d.score_breakdown.subscores) {
+    const labels = d.subscore_labels || {};
+    html += `<div class="drawer-section"><div class="drawer-title">评分详情</div>`;
+    for (const [key, ss] of Object.entries(d.score_breakdown.subscores)) {
+      if (ss.is_risk) continue;
+      const label = labels[key] || key;
+      const color = scoreColor(ss.score, false);
+      html += `<div class="score-bar"><span class="name" style="width:90px">${label}</span><div class="track"><div class="fill ${color}" style="width:${ss.score}%"></div></div><span class="num">${ss.available ? fmt(ss.score, 0) : '—'}</span></div>`;
+    }
+    html += `<div style="font-size:0.7rem;color:var(--text-muted);margin:6px 0 2px">风险</div>`;
+    for (const [key, ss] of Object.entries(d.score_breakdown.subscores)) {
+      if (!ss.is_risk) continue;
+      const label = labels[key] || key;
+      const color = scoreColor(ss.score, true);
+      html += `<div class="score-bar"><span class="name" style="width:90px">${label}</span><div class="track"><div class="fill ${color}" style="width:${ss.score}%"></div></div><span class="num">${ss.available ? fmt(ss.score, 0) : '—'}</span></div>`;
+    }
+    html += `</div>`;
+  }
+
+  // 第三部分：资金摘要（§31）
+  const fv = d.features || {};
+  html += `<div class="drawer-section"><div class="drawer-title">资金摘要</div>`;
+  html += `<div class="drawer-flow">`;
+  const flowItems = [
+    ['RVOL', fv.relative_volume || fv.rvol, 'x'],
+    ['Taker B/S', fv.delta_ratio, ''],
+    ['OI 5m', fv.oi_change_5m, '%'],
+    ['OI 1h', fv.oi_change_5m, '%'],
+    ['Funding', fv.funding, '%'],
+    ['Premium', fv.premium, ''],
+    ['Spot CVD', fv.spot_cvd, ''],
+    ['Perp CVD', fv.cvd, ''],
+  ];
+  for (const [label, val, unit] of flowItems) {
+    if (val != null) html += `<div class="flow-item"><span class="text-muted">${label}</span> <span class="font-mono">${fmt(val, 4)}${unit}</span></div>`;
+  }
+  if (d.spot_perp_label) html += `<div class="flow-item full"><span class="text-muted">现货×合约</span> ${escapeHtml(d.spot_perp_label)}</div>`;
+  if (d.impulse_label) html += `<div class="flow-item full"><span class="text-muted">多空推动</span> ${escapeHtml(d.impulse_label)}</div>`;
+  html += `</div></div>`;
+
+  // 第四部分：突破生命周期（§32）
+  html += `<div class="drawer-section"><div class="drawer-title">突破生命周期</div>`;
+  if (d.trend_label) html += `<div class="drawer-flow-item"><span class="text-muted">趋势</span> ${escapeHtml(d.trend_label)} ${d.trend_score != null ? '(' + fmt(d.trend_score, 0) + ')' : ''}</div>`;
+  if (d.location_label) html += `<div class="drawer-flow-item"><span class="text-muted">位置</span> ${escapeHtml(d.location_label)}</div>`;
+  if (d.accumulation_score != null) html += `<div class="drawer-flow-item"><span class="text-muted">吸筹迹象</span> ${fmt(d.accumulation_score, 0)}</div>`;
+  if (d.distribution_risk != null) html += `<div class="drawer-flow-item"><span class="text-muted">派发风险</span> ${fmt(d.distribution_risk, 0)}</div>`;
+  if (d.pump_risk != null) html += `<div class="drawer-flow-item"><span class="text-muted">Pump风险</span> ${fmt(d.pump_risk, 0)}</div>`;
+  html += `</div>`;
+
+  // 第五部分：证据投票（§33）
+  if (d.signal_confirmation_breakdown) {
+    const sb = d.signal_confirmation_breakdown;
+    html += `<div class="drawer-section"><div class="drawer-title">证据投票</div>`;
+    html += `<div class="evidence-vote">核心证据 ${sb.core_passed}/${sb.core_total} · 辅助证据 ${sb.supporting_passed}/${sb.supporting_total} · ${sb.veto_passed ? '✅ Veto通过' : '❌ Veto命中'}</div>`;
+    if (sb.strong_confirm) html += `<div class="strong-confirm">确认强度：强</div>`;
+    html += `</div>`;
+  }
+
+  // 第六部分：状态时间轴（§34）
+  if (d.timeline && d.timeline.length > 0) {
+    html += `<div class="drawer-section"><div class="drawer-title">状态时间轴</div><div class="timeline">`;
+    const tl = [...d.timeline].reverse();
+    for (const t of tl) {
+      html += `<div class="timeline-item"><span class="time">${ts(t.time)}</span><span class="label">${t.state}</span></div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  return html;
 }
 
 async function loadPreview(symbol) {
@@ -856,52 +1033,97 @@ function clearSearch() {
 }
 
 // ═══════════════════════════════════════
-// 数据轮询
+// 数据轮询 — V1.2 §6 分层节奏
+//   价格 1.5s · OI/CVD/Delta/Funding 5s · 子评分/Top10 12s
 // ═══════════════════════════════════════
-let pollTimer = null;
+let priceTimer = null;
+let dataTimer = null;
+let top10Timer = null;
 
+// V1.2 §6.1 当前价格 1-2s
+async function pollPrices() {
+  const prices = await API.getPrices();
+  if (prices) State.pricesData = prices;
+  updatePriceDisplay();
+}
+
+function updatePriceDisplay() {
+  // 只更新当前价 DOM，不重渲染整卡（§6 慢下来）
+  for (const [sym, price] of Object.entries(State.pricesData)) {
+    const el = document.querySelector(`[data-price-symbol="${sym}"]`);
+    if (el) el.textContent = fmtPrice(price);
+  }
+}
+
+function fmtPrice(p) {
+  if (p == null || isNaN(p)) return '-';
+  if (p >= 1000) return Number(p).toFixed(2);
+  if (p >= 1) return Number(p).toFixed(4);
+  if (p >= 0.01) return Number(p).toFixed(5);
+  return Number(p).toPrecision(4);
+}
+
+// V1.2 §6.2 OI/CVD/Delta/Funding 3-5s
 async function pollData() {
   const tasks = [];
-
-  // 首页和全市场需要 radar
   if (State.currentPage === 'home' || State.currentPage === 'market') {
     tasks.push(API.getRadar().then(d => { if (d) State.radarData = d; }));
   }
+  if (State.currentPage === 'market') {
+    tasks.push(API.getStats().then(d => { if (d) State.statsData = d; }));
+  }
+  if (State.currentPage === 'signals') {
+    tasks.push(API.getSignals().then(d => { if (d) State.signalsData = d; }));
+  }
+  if (State.currentPage === 'health') {
+    tasks.push(API.getHealth().then(d => { if (d) State.healthData = d; }));
+  }
+  await Promise.all(tasks);
+  if (State.currentPage === 'market') renderPage();
+}
 
-  // 首页需要 top10 + summary + stats
+// V1.2 §6.3-6.4 子评分 10-15s / Top10 重排 30s（后端滞回）
+async function pollTop10() {
+  const tasks = [];
   if (State.currentPage === 'home') {
     tasks.push(API.getTop10().then(d => { if (d) State.top10Data = d; State.loading = false; }));
     tasks.push(API.getMarketSummary().then(d => { if (d) State.summaryData = d; }));
     tasks.push(API.getStats().then(d => { if (d) State.statsData = d; }));
   }
-
-  // 全市场和首页需要 stats
-  if (State.currentPage === 'market') {
-    tasks.push(API.getStats().then(d => { if (d) State.statsData = d; }));
-  }
-
-  // 信号中心
-  if (State.currentPage === 'signals') {
-    tasks.push(API.getSignals().then(d => { if (d) State.signalsData = d; }));
-  }
-
-  // 数据健康
-  if (State.currentPage === 'health') {
-    tasks.push(API.getHealth().then(d => { if (d) State.healthData = d; }));
-  }
-
   await Promise.all(tasks);
-
-  // 只在非详情页自动刷新（详情页按需加载）
-  if (State.currentPage !== 'detail') {
-    renderPage();
+  if (State.currentPage === 'home') {
+    // §6.3 仅在状态变化 / 分数变化 >3 / 排名变化时才重渲染
+    if (top10MateriallyChanged(State.top10Data)) {
+      renderPage();
+    }
   }
 }
 
+function top10MateriallyChanged(newTop10) {
+  const prev = State.lastRendered.top10;
+  if (!prev) return true;
+  if (newTop10.length !== prev.length) return true;
+  for (let i = 0; i < newTop10.length; i++) {
+    const a = newTop10[i], b = prev[i];
+    if (!b || a.symbol !== b.symbol) return true;
+    if (a.state !== b.state) return true;
+    if (a.direction !== b.direction) return true;
+    if (Math.abs((a.opportunity_score || 0) - (b.opportunity_score || 0)) > 3) return true;
+    if (Math.abs((a.signal_confirmation_pct || 0) - (b.signal_confirmation_pct || 0)) > 3) return true;
+  }
+  return false;
+}
+
 function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
+  if (priceTimer) clearInterval(priceTimer);
+  if (dataTimer) clearInterval(dataTimer);
+  if (top10Timer) clearInterval(top10Timer);
+  pollPrices();
   pollData();
-  pollTimer = setInterval(pollData, 3000);
+  pollTop10();
+  priceTimer = setInterval(pollPrices, 1500);   // §6.1 当前价 1-2s
+  dataTimer = setInterval(pollData, 5000);       // §6.2 OI/CVD/Delta 3-5s
+  top10Timer = setInterval(pollTop10, 12000);    // §6.3 子评分 10-15s
 }
 
 // ═══════════════════════════════════════

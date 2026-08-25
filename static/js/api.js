@@ -23,5 +23,6 @@ const API = {
   async getSignals() { return this._fetch('/signals'); },
   async getTop10() { return this._fetch('/top10'); },
   async getMarketSummary() { return this._fetch('/market-summary'); },
+  async getPrices() { return this._fetch('/prices'); },
   async getSymbolDetail(symbol) { return this._fetch('/symbol/' + symbol); },
 };

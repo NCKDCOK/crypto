@@ -188,3 +188,60 @@ class TestBreakdown:
         cfg = ScoringConfig(w_capital_inflow=0.5, w_startup_quality=0.3, w_trend=0.2)
         eng = ScoreEngine(cfg)
         assert eng.cfg.w_capital_inflow == 0.5
+
+
+class TestMissingDataNoDefault50:
+    """V1.2 §5：缺失数据不得默认 50，从分母移除，降 coverage。"""
+
+    def test_subscore_tracks_coverage_and_missing(self):
+        eng = _engine()
+        # 只给 capital_inflow 5 项中的 2 项
+        snap = _make_snap({"oi_change_5m": 0.05, "cvd_slope_z": 3.0})
+        bd = eng.compute(snap, State.START_CONFIRMED, "LONG", 5, 0, 0, sample_count=20)
+        ci = bd.subscores["capital_inflow"]
+        assert ci.available
+        assert ci.coverage < 1.0
+        assert len(ci.missing) == 3  # signed_delta, cvd_accel_z, price_return_30s
+        d = bd.to_dict()
+        assert "coverage" in d["subscores"]["capital_inflow"]
+        assert "missing" in d["subscores"]["capital_inflow"]
+
+    def test_missing_does_not_default_to_50(self):
+        """缺失组件不应把子评分拉向 50。"""
+        eng = _engine()
+        # 仅 volume_z 极高，其余全缺 → anomaly_intensity 只剩 1 项
+        snap = _make_snap({"volume_z": 8.0})
+        bd = eng.compute(snap, State.ANOMALY, "LONG", 3, 0, 0, sample_count=20)
+        ai = bd.subscores["anomaly_intensity"]
+        assert ai.available
+        # 仅 volume_z(8) → sigmoid ≈ 高分，不会被缺失项拉到 50
+        assert ai.score > 70
+        assert ai.coverage < 1.0
+
+    def test_all_missing_subscore_unavailable(self):
+        eng = _engine()
+        snap = _make_snap({})  # 全缺
+        bd = eng.compute(snap, State.ANOMALY, "LONG", 3, 0, 0, sample_count=20)
+        for ss in bd.subscores.values():
+            if ss.name == "sustained_startup":
+                continue  # sustained_startup 总可用（state/duration/evidence）
+            assert not ss.available, f"{ss.name} should be unavailable when all data missing"
+            assert ss.coverage == 0.0
+
+    def test_breakdown_has_coverage_and_missing(self):
+        eng = _engine()
+        snap = _make_snap({"volume_z": 3.0, "oi_change_5m": 0.02})
+        bd = eng.compute(snap, State.ANOMALY, "LONG", 3, 0, 0, sample_count=20)
+        d = bd.to_dict()
+        assert "coverage" in d
+        assert "missing" in d
+        assert 0.0 < d["coverage"] < 1.0
+        assert len(d["missing"]) > 0
+
+    def test_partial_data_still_in_range(self):
+        """部分缺失时分数仍在 0~100。"""
+        eng = _engine()
+        snap = _make_snap({"volume_z": 3.0})
+        bd = eng.compute(snap, State.ANOMALY, "LONG", 3, 0, 0, sample_count=20)
+        assert bd.available
+        assert 0 <= bd.opportunity_score <= 100

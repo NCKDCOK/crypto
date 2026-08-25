@@ -31,11 +31,47 @@ class AppConfig(BaseModel):
     connection_max_lifetime_hours: float = Field(default=24.0, gt=0)
     # 出口代理（受限环境用）；空字符串/None 表示直连
     proxy: str | None = Field(default=None)
+    # V1.2 §9 现货 endpoints
+    spot_ws_base_url: str = Field(default="wss://stream.binance.com:9443")
+    spot_rest_base_url: str = Field(default="https://api.binance.com")
+    enable_spot: bool = Field(default=True, description="是否启用现货数据采集")
     # 编排节奏（秒）
     light_scan_interval_s: float = Field(default=20.0, gt=0)
     deep_compute_interval_s: float = Field(default=2.0, gt=0)
     candidate_refresh_interval_s: float = Field(default=60.0, gt=0)
     deep_max_symbols: int = Field(default=40, ge=1, le=1024)
+    # 本地持久化数据目录（V1.2 停机恢复）
+    data_dir: str = Field(default="data", description="SQLite 等本地数据存放目录")
+
+
+class RecoveryConfig(BaseModel):
+    """停机恢复配置（V1.2）。三档恢复策略。"""
+
+    # 停机时间分档（秒）
+    tier_quick_s: float = Field(default=300.0, gt=0, description="<5min 快速恢复")
+    tier_full_s: float = Field(default=3600.0, gt=0, description="5min~1h 补历史重算；>1h 全部失效重建")
+    # 回填 K 线根数（每周期）
+    backfill_kline_limit: int = Field(default=300, ge=10, le=1500)
+    # 进入 LIVE 的最小实时样本（OI/CVD/Delta 预热）
+    live_min_samples: int = Field(default=10, ge=1)
+    # Trade Plan 过期阈值（停机超过此值 → 旧 plan 标 EXPIRED）
+    trade_plan_expire_s: float = Field(default=600.0, gt=0)
+
+
+class MarketRegimeConfig(BaseModel):
+    """市场背景引擎配置（V1.2 §8）。NOTE: uncalibrated 初值。"""
+
+    btc_dominant_return: float = Field(default=0.01, description="BTC 1h 涨幅超此值且强于山寨 → BTC 主导")
+    btc_dominant_gap: float = Field(default=0.01, description="BTC 领先山寨的差距")
+    panic_return: float = Field(default=0.03, description="BTC 1h 跌幅超此值 → 恐慌")
+    panic_down_ratio: float = Field(default=0.7, ge=0, le=1)
+    deleverage_return: float = Field(default=0.015, description="BTC 1h 跌幅超此值 → 去杠杆")
+    deleverage_oi_contract: float = Field(default=0.4, ge=0, le=1, description="OI 收缩比例超此值")
+    risk_on_up_ratio: float = Field(default=0.55, ge=0, le=1)
+    risk_on_anomaly_ratio: float = Field(default=0.1, ge=0, le=1)
+    risk_off_down_ratio: float = Field(default=0.55, ge=0, le=1)
+    chop_anomaly_ratio: float = Field(default=0.05, ge=0, le=1)
+    chop_breadth_balance: float = Field(default=0.1, ge=0, le=1)
 
 
 class FreshnessBudget(BaseModel):
@@ -132,6 +168,7 @@ class DetectorsConfig(BaseModel):
     veto_one_bar_spike_retrace: float = Field(default=0.6, ge=0)
     # continuation / exhaustion / withdrawal
     continuation_min_oi_maintain: float = Field(default=0.0)
+    continuation_min_evidence_count: int = Field(default=2, ge=1, description="V1.2 §21 真实证据化最低通过数")
     exhaustion_min_divergence_count: int = Field(default=2, ge=1)
     withdrawal_min_evidence_count: int = Field(default=3, ge=1)
     # light scanner (Stage1) — 短时增量异动
@@ -173,13 +210,29 @@ class ScoringConfig(BaseModel):
     risk_penalty_scale: float = Field(default=0.4, ge=0, le=1, description="风险分对机会分的扣减比例")
     # 评分预热
     warmup_min_samples: int = Field(default=10, ge=1, description="最小样本数才开始评分")
-    # 置信度因子
-    confidence_base: float = Field(default=0.95, ge=0, le=1)
-    confidence_missing_source_penalty: float = Field(default=0.15, ge=0, le=1)
-    confidence_stale_penalty: float = Field(default=0.30, ge=0, le=1)
-    confidence_degraded_penalty: float = Field(default=0.10, ge=0, le=1)
-    confidence_low_evidence_penalty: float = Field(default=0.08, ge=0, le=1)
-    confidence_min_evidence: int = Field(default=3, ge=1)
+    # ── Data Confidence / 数据可信度（V1.2 §3.3）──
+    # NOTE: 以下权重为 uncalibrated 初值，待 Replay Calibration（P23）校准。
+    data_confidence_base: float = Field(default=100.0, ge=0, le=100)
+    data_confidence_unknown_penalty: float = Field(default=40.0, ge=0, le=100, description="关键流 STALE/FAIL 扣分（须低于 strong_confirm 门）")
+    data_confidence_degraded_penalty: float = Field(default=10.0, ge=0, le=100)
+    data_confidence_stale_penalty: float = Field(default=15.0, ge=0, le=100, description="stale_flag 命中扣分")
+    data_confidence_missing_oi_penalty: float = Field(default=15.0, ge=0, le=100)
+    data_confidence_missing_funding_penalty: float = Field(default=5.0, ge=0, le=100)
+    data_confidence_missing_kline_penalty: float = Field(default=8.0, ge=0, le=100)
+    data_confidence_missing_spot_penalty: float = Field(default=5.0, ge=0, le=100)
+    data_confidence_queue_lag_penalty: float = Field(default=5.0, ge=0, le=100)
+    data_confidence_queue_lag_penalty_ms: float = Field(default=2000.0, ge=0, description="队列延迟超此值才扣分")
+    # ── Signal Confirmation / 信号确认度（V1.2 §3.2）──
+    # NOTE: uncalibrated 初值，待 Replay Calibration（P23）校准。
+    sc_core_weight: float = Field(default=0.45, ge=0, le=1)
+    sc_supporting_weight: float = Field(default=0.25, ge=0, le=1)
+    sc_veto_weight: float = Field(default=0.15, ge=0, le=1)
+    sc_multitf_weight: float = Field(default=0.15, ge=0, le=1)
+    sc_volume_z_threshold: float = Field(default=2.0, ge=0, description="辅助证据：成交量异常阈值")
+    sc_acceptance_threshold: float = Field(default=0.5, ge=0, le=1, description="突破有效性阈值")
+    sc_retrace_healthy: float = Field(default=0.4, ge=0, le=1, description="回踩健康阈值（retrace_ratio 上限）")
+    sc_spot_agreement_threshold: float = Field(default=0.3, ge=-1, le=1, description="现货合约一致性阈值")
+    sc_strong_confirm_min_dc: float = Field(default=70.0, ge=0, le=100, description="强确认所需最低 data_confidence")
 
 
 class AppConfigBundle(BaseModel):
@@ -193,6 +246,8 @@ class AppConfigBundle(BaseModel):
     detectors: DetectorsConfig = Field(default_factory=DetectorsConfig)
     hysteresis: HysteresisConfig = Field(default_factory=HysteresisConfig)
     scoring: ScoringConfig = Field(default_factory=ScoringConfig)
+    recovery: RecoveryConfig = Field(default_factory=RecoveryConfig)
+    market_regime: MarketRegimeConfig = Field(default_factory=MarketRegimeConfig)
 
 
 # ────────────────────────────────────────────────────────────────────

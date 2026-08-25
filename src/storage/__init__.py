@@ -55,6 +55,40 @@ class Repository(ABC):
         """回放/历史查询。"""
         ...
 
+    # ── V1.2 持久化方法（默认 no-op，SqliteRepository 覆写）──
+
+    def save_kline(self, kline: Any) -> None:
+        """持久化 closed K 线。默认 no-op。"""
+        pass
+
+    def save_oi_snapshot(self, snap: OpenInterestSnapshot) -> None:
+        """持久化 OI 快照。默认 no-op。"""
+        pass
+
+    def save_funding_snapshot(self, snap: Any) -> None:
+        """持久化 Funding 快照。默认 no-op。"""
+        pass
+
+    def save_trade_plan(self, symbol: str, asof: int, plan: dict[str, Any]) -> None:
+        """持久化 Trade Plan 快照。默认 no-op。"""
+        pass
+
+    def expire_trade_plans(self, symbol: str | None, before_asof: int) -> int:
+        """过期 Trade Plan。默认 no-op。"""
+        return 0
+
+    def get_active_trade_plan(self, symbol: str) -> dict[str, Any] | None:
+        return None
+
+    def get_last_write_ms(self) -> int | None:
+        return None
+
+    def get_recent_klines(self, symbol: str, interval: str, limit: int = 300) -> list[Any]:
+        return []
+
+    def close(self) -> None:
+        pass
+
 
 class InMemoryRepository(Repository):
     """内存实现 — 测试/replay 用。Gate 0 提供基本可用版本。"""

@@ -108,3 +108,19 @@ async def get_market_summary():
     if runtime is None:
         return {"conclusion": "系统启动中...", "top10": [], "state_counts": {}}
     return runtime.get_market_summary()
+
+
+@app.get("/api/prices")
+async def get_prices():
+    """轻量价格快照（前端 1-2s 轮询当前价，V1.2 §6.1）。"""
+    if runtime is None:
+        return {}
+    return runtime.get_prices()
+
+
+@app.get("/api/pushes")
+async def get_pushes():
+    """V1.2 §37 推送历史（State Transition Push）。"""
+    if runtime is None:
+        return []
+    return runtime.push_history[-50:]

@@ -21,3 +21,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# Runtime data (SQLite persistence)
+data/

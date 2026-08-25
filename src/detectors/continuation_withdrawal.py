@@ -43,10 +43,17 @@ class WithdrawalResult:
 
 
 class ContinuationDetector:
-    """Continuation Detector — 主力还在不在。"""
+    """Continuation Detector — 主力还在不在。
 
-    def __init__(self, min_oi_maintain: float = 0.0) -> None:
+    V1.2 §21：持续启动必须来自真实资金证据，禁止「因为在 CONTINUATION 所以高分」。
+    证据：OI persistence / CVD persistence / Delta persistence / repeated active flow /
+          healthy retrace / second impulse / price efficiency / breakout hold。
+    """
+
+    def __init__(self, min_oi_maintain: float = 0.0,
+                 min_evidence_count: int = 2) -> None:
         self.min_oi_maintain = min_oi_maintain
+        self.min_evidence_count = min_evidence_count
 
     def detect(
         self,
@@ -54,19 +61,22 @@ class ContinuationDetector:
         direction: Direction | None = None,
     ) -> ContinuationResult:
         evidence: list[Evidence] = []
+        passed_count = 0
 
-        # OI 维持或扩张
+        # OI 维持或扩张（OI persistence）
         oi = snap.features.get("oi_change_1m")
         if oi and oi.available and oi.value is not None:
             oi_maintained = oi.value >= self.min_oi_maintain
             evidence.append(Evidence(
                 family=EvidenceFamily.POSITION,
-                type="oi_maintained",
+                type="oi_persistence",
                 value=oi.value,
                 passed=oi_maintained,
             ))
+            if oi_maintained:
+                passed_count += 1
 
-        # CVD 维持方向
+        # CVD 维持方向（CVD persistence）
         cvd_slope = snap.features.get("cvd_slope_z")
         if cvd_slope and cvd_slope.available and cvd_slope.value is not None:
             cvd_maintained = (
@@ -76,12 +86,31 @@ class ContinuationDetector:
             )
             evidence.append(Evidence(
                 family=EvidenceFamily.FLOW,
-                type="cvd_direction_maintained",
+                type="cvd_persistence",
                 value=cvd_slope.value,
                 passed=cvd_maintained,
             ))
+            if cvd_maintained:
+                passed_count += 1
 
-        # 效率健康
+        # Delta persistence（主动资金持续）
+        delta = snap.features.get("taker_delta") or snap.features.get("signed_delta")
+        if delta and delta.available and delta.value is not None:
+            delta_maintained = (
+                (direction == Direction.LONG and delta.value > 0)
+                or (direction == Direction.SHORT and delta.value < 0)
+                or direction is None
+            )
+            evidence.append(Evidence(
+                family=EvidenceFamily.FLOW,
+                type="delta_persistence",
+                value=delta.value,
+                passed=delta_maintained,
+            ))
+            if delta_maintained:
+                passed_count += 1
+
+        # Price efficiency 健康（healthy retrace + efficiency）
         eff = snap.features.get("directional_efficiency")
         if eff and eff.available and eff.value is not None:
             eff_healthy = eff.value > 0.2
@@ -91,12 +120,28 @@ class ContinuationDetector:
                 value=eff.value,
                 passed=eff_healthy,
             ))
+            if eff_healthy:
+                passed_count += 1
 
-        all_passed = all(e.passed for e in evidence) if evidence else False
+        # Healthy retrace（回撤可控 = 回踩健康）
+        retrace = snap.features.get("retrace_ratio")
+        if retrace and retrace.available and retrace.value is not None:
+            retrace_healthy = retrace.value < 0.5
+            evidence.append(Evidence(
+                family=EvidenceFamily.PRICE_EFFECT,
+                type="healthy_retrace",
+                value=retrace.value,
+                passed=retrace_healthy,
+            ))
+            if retrace_healthy:
+                passed_count += 1
+
+        # V1.2 §21：必须达到 min_evidence_count 才算 continuing（真实证据化）
+        is_continuing = passed_count >= self.min_evidence_count
         any_failed = any(not e.passed for e in evidence) if evidence else True
 
         return ContinuationResult(
-            is_continuing=all_passed,
+            is_continuing=is_continuing,
             is_weakening=any_failed,
             evidence=evidence,
         )

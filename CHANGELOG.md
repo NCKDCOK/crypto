@@ -1,5 +1,58 @@
 # CHANGELOG
 
+## [V1.2] — 资金生命周期 × 市场背景 × 结构位置 × 置信度 × Trade Plan
+
+依据《资金行为雷达_V1.2》修改方案（25 执行步骤 + 用户追加持久化/恢复层）。
+把系统从「实时数据多、分数多、状态变化快」升级为「打开首页就知道最值得看什么、为什么、处于什么阶段、是否适合参与、什么位置失效、资金有没有撤离」。
+
+### 基础层
+
+- **P0 本地持久化 + 停机恢复**：新增 `SqliteRepository`（K线/OI/Funding/信号/TradePlan 持久化）；新增 `RecoveryManager` 三档恢复策略（<5m 快速 / 5m~1h 补历史重算 / >1h 全部失效重建）；新增 `SystemMode`（RECOVERY→WARMUP→LIVE）门控——非 LIVE 不产出强确认 Top10、不发正式推送；OI 重启后第一条作新基准，CVD/Delta 重新预热；Trade Plan 停机超阈值标记 EXPIRED。
+- **P1 Confidence 语义修复（§3-4）**：拆分 `data_confidence`（数据可信度，0~100）与 `signal_confirmation`（信号确认度，0~100），保留 `ConfidenceState` 作 fail-closed 门；排名改三因子（机会×确认×可信）；UI 标「确认度」非「胜率」。
+- **P2 Missing score 修复（§5）**：评分引擎缺失数据不再默认 50，按可用权重归一化，每个子评分带 `coverage`/`missing`。
+- **P3 UI 刷新节奏稳定（§6）**：`RankingHysteresis`（30s 重排，分差>3 或连续 2 轮才交换）；前端分层轮询（价格 1.5s / OI-CVD-Delta 5s / Top10 12s）；子评分 ±3 节流；新增 `/api/prices` 轻量价格端点。
+
+### 分析层
+
+- **P4 Market Regime Engine（§8）**：7 状态市场背景（ALT_RISK_ON/OFF/BTC_DOMINANT/CHOP/DELEVERAGING/PANIC/NEUTRAL）+ 文案。
+- **P5 Spot Data（§9）**：`SpotSymbolRegistry` + 现货 aggTrade 采集器 + spot_volume/cvd/taker/delta + `spot_perp_agreement`；无现货标记 unavailable 不伪造。
+- **P6 Spot×Perp Confirmation（§9）**：健康启动 vs 杠杆主导分类。
+- **P7 Impulse Asymmetry（§10）**：多空推动效率（upside/downside velocity + volume/delta efficiency + impulse_ratio）。
+- **P8 Accumulation/Absorption（§11）**：sell absorption / CVD-价格背离 / 低位换手 / OI 渐增 / Spot 确认 / Reclaim。
+- **P9 Dormant Revival（§12）**：沉睡复活识别。
+- **P10 Distribution（§13）**：派发风险（高量低效/CVD 背离/OI 衰减/突破失败/现货卖压）。
+- **P11 Setup Type（§14）**：10 类 Setup 分类 + 中文文案。
+- **P12 Breakout Lifecycle（§15）**：突破（5m 收盘站外）→保持→回踩→二次确认→强确认（5m+15m 同向+1h 不逆）。
+- **P13 Structure Engine（§16）**：Swing H/L、HH/HL/LH/LL、Support/Resistance、Breakout Level、Retest Zone、Failed Breakout/Breakdown、VWAP、ATR。
+- **P14 Volume Profile（§17）**：POC/VAH/VAL/HVN/LVN/High-Low Volume Zone。
+- **P15 Location Engine（§19）**：位置偏高不建议追 / 合理回踩承接区。
+- **P16 Trend Engine 升级（§20）**：HH/HL/LH/LL + multi-bar slope + ATR-normalized return + VWAP relation + 多周期 agreement。
+- **P17 Continuation 真实证据化（§21）**：禁止因在 CONTINUATION 就高分；改为 OI/CVD/Delta persistence + healthy retrace + efficiency，需 min_evidence_count 通过。
+
+### 评分层
+
+- **P18 Score Engine V1.2（§23-24, §41）**：三评分独立（机会/确认/可信）+ setup_type 注入 + Pump Risk 高时 Opportunity 受惩罚；`PumpRiskEngine`（§41）。
+- **P19 Trade Plan Engine（§25）**：Entry 来自结构（Breakout/Retest/Support/POC/VWAP/Swing/ATR，非 AI 自由生成）/ Invalidation / TP1-3 / R:R / chase_status；START_CONFIRMED 冻结 snapshot 不漂移；RR 不足输出「不建议追入」。
+
+### UI / Push
+
+- **P20 Top10 V1.2 卡片（§27）**：当前价 / Setup / 机会×确认×可信 / 子评分 / 一句话 / 当前计划；市场背景横幅；无机会明确等待。
+- **P21 Side Drawer（§28-34）**：右侧 480px 滑出抽屉，六部分（概要/评分/资金摘要/突破生命周期/证据投票/状态时间轴）。
+- **P22 Push Engine（§37-38）**：State Transition Push（SUSPECTED→CONFIRMED / CONFIRMED→CONTINUATION / CONTINUATION→EXHAUSTION / EXHAUSTION→WITHDRAWAL）；§38 完整字段；RECOVERY 期不发；`/api/pushes`。
+
+### 校准
+
+- **P23 Replay Calibration（§42）**：`CalibrationStore` 记录每个 Setup 快照 + future_5m/15m/1h + MFE/MAE；分桶正向率统计（历史胜率待足够样本后输出）。
+
+### 测试 / 文档
+
+- **P24 Tests（§45）**：Accumulation/Distribution/Breakout/Setup/Location/TradePlan/Confidence 全场景回归（528 tests green）。
+- **P25 Documentation**：CHANGELOG + ADR-0002 记录 V1.2 大规模重构决策。
+
+**测试：528 passed。权重全部标注 uncalibrated（待 Replay Calibration 校准）。禁止自动交易。**
+
+---
+
 ## [V1.1] — 2026-08-26 — Runtime 修复 + 评分体系 + Top10 大屏 + UI 产品化
 
 依据《资金行为雷达_V1.1》计划（19 步骤）。在后端修复 6 个 P0 问题、引入可解释评分体系、翻译层、Top10 排名，并从 100 行内联 HTML 升级为 6 页面 SPA 大屏。

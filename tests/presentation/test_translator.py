@@ -5,7 +5,8 @@ from __future__ import annotations
 from src.domain import ConfidenceState, State
 from src.presentation.translator import PresentationTranslator
 from src.scoring.engine import ScoreBreakdown, SubScore
-from src.scoring.confidence import ConfidenceBreakdown
+from src.scoring.data_confidence import DataConfidenceBreakdown
+from src.scoring.signal_confirmation import SignalConfirmationBreakdown
 
 
 class TestStateTranslation:
@@ -113,9 +114,10 @@ class TestSummary:
         bd.subscores["capital_inflow"] = SubScore("ci", "资金输入", 80, True)
         bd.subscores["startup_quality"] = SubScore("sq", "启动质量", 80, True)
         bd.subscores["withdrawal_risk"] = SubScore("wr", "撤离风险", 15, True, is_risk=True)
-        cb = ConfidenceBreakdown(confidence=0.9, available=True)
+        dc = DataConfidenceBreakdown(score=90, available=True, coverage=1.0)
+        sc = SignalConfirmationBreakdown(score=85, available=True, strong_confirm=True)
         summary = PresentationTranslator.generate_summary(
-            State.START_CONFIRMED, "LONG", bd, cb
+            State.START_CONFIRMED, "LONG", bd, dc, sc
         )
         assert "做多" in summary
         assert "资金" in summary
@@ -124,9 +126,10 @@ class TestSummary:
         bd = ScoreBreakdown(opportunity_score=50, available=True)
         bd.subscores["capital_inflow"] = SubScore("ci", "资金输入", 40, True)
         bd.subscores["startup_quality"] = SubScore("sq", "启动质量", 40, True)
-        cb = ConfidenceBreakdown(confidence=0.6, available=True)
+        dc = DataConfidenceBreakdown(score=60, available=True, coverage=0.75)
+        sc = SignalConfirmationBreakdown(score=40, available=True)
         summary = PresentationTranslator.generate_summary(
-            State.SUSPECTED_START, "LONG", bd, cb
+            State.SUSPECTED_START, "LONG", bd, dc, sc
         )
         assert "确认" in summary
 
