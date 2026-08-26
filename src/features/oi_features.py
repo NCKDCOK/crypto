@@ -41,6 +41,8 @@ class OIFeatures:
     oi_change_pct_5m: float | None = None
     oi_change_pct_15m: float | None = None
     oi_change_pct_1h: float | None = None
+    # V1.4 §十七：OI zscore（相对自身历史 robust baseline，避免固定阈值对不同币失效）
+    oi_zscore: float | None = None
 
 
 def _asof_snapshot(
@@ -138,6 +140,23 @@ def compute_oi_accel(snapshots: Sequence[OpenInterestSnapshot]) -> float | None:
     return v2 - v1
 
 
+def compute_oi_zscore(snapshots: Sequence[OpenInterestSnapshot]) -> float | None:
+    """V1.4 §十七：OI robust z-score = (current - median) / (1.4826*MAD)。
+
+    相对自身近期 OI 历史，避免固定阈值对不同市值山寨币失效。
+    样本不足（<3）或 robust_std=0 → None。
+    """
+    from src.features.baseline import compute_baseline, robust_z_score
+
+    if not snapshots:
+        return None
+    sorted_snaps = sorted(snapshots, key=lambda s: s.receive_time)
+    current = float(sorted_snaps[-1].open_interest)
+    history = [float(s.open_interest) for s in sorted_snaps]
+    baseline = compute_baseline(history)
+    return robust_z_score(current, baseline)
+
+
 def compute_oi_features(
     snapshots: Sequence[OpenInterestSnapshot],
     tolerance_ms: int = 15_000,
@@ -170,4 +189,6 @@ def compute_oi_features(
         oi_change_pct_5m=compute_oi_change_pct(snapshots, 300_000, tolerance_ms),
         oi_change_pct_15m=compute_oi_change_pct(snapshots, 900_000, tolerance_ms),
         oi_change_pct_1h=compute_oi_change_pct(snapshots, 3_600_000, tolerance_ms),
+        # V1.4 §十七：OI zscore
+        oi_zscore=compute_oi_zscore(snapshots),
     )

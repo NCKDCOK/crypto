@@ -1,0 +1,42 @@
+# 正式推荐配置（V1.4 §三 ~ §六, §三十三, §三十四）
+# 对应 schema：src/config/__init__.py RecommendationConfig
+# 正式推荐（Published Recommendation）与实时排名分离；缺失文件时使用默认值。
+
+# ── §3.1 标准确认门槛 ──
+min_opportunity: 70.0          # Opportunity >= 70
+min_signal_confirmation: 75.0  # Signal Confirmation >= 75
+min_data_confidence: 85.0      # Data Confidence >= 85
+max_pump_risk: 50.0            # Pump Risk >= 50 不得发布
+minimum_rr: 1.5                # TP1 RR 下限
+
+# 证据投票：核心 >= 3/3，辅助 >= 3/5
+core_min_passed: 3
+core_min_total: 3
+aux_min_passed: 3
+aux_min_total: 5
+
+# 突破类 Setup：发布必须 5m 收盘确认突破（breakout_confirmed=true）
+breakout_require_setups:
+  - BREAKOUT_START
+  - RETEST_REIGNITION
+  - TREND_CONTINUATION
+  - SHORT_SQUEEZE
+
+# ── §3.2 强确认 ──
+strong_1h_opposite_threshold: 0.5    # 1h 反向强度（%）超此值 → 强确认不成立
+strong_spot_agreement_min: 0.3       # 现货-合约一致性下限
+
+# ── §四 5m 决策边界 ──
+five_min_boundary: true              # 仅新 5m 收盘才评估 Gate；Hard Veto/Invalidation 例外
+
+# ── §三十三 最低驻留 ──
+minimum_published_lifetime_s: 300.0  # 1 个 5m 周期；Hard Veto/Invalidation/Withdrawal/Data Critical 例外
+
+# ── §三十四 冷却 ──
+recommendation_cooldown_s: 1800.0    # 同 symbol+方向+Setup 30m 冷却
+
+# ── §八 普通降级滞回 ──
+lifecycle_downgrade_streak: 2        # 连续 N 次离开正式范围才普通降级退出
+
+# ── 容量 ──
+max_active: 10                       # 同时活跃正式推荐上限

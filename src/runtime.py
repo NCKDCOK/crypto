@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -32,10 +33,20 @@ from src.collectors.aggtrade_collector import AggTradeCollector
 from src.collectors.base_ws import WSStreamConfig
 from src.collectors.funding_collector import FundingPremiumCollector
 from src.collectors.kline_collector import KlineCollector
+from src.collectors.long_short_ratio_collector import LongShortRatioCollector
 from src.collectors.oi_poller import OIPoller
 from src.collectors.symbol_registry import SymbolRegistry
 from src.collectors.spot_registry import SpotSymbolRegistry
 from src.config import AppConfigBundle
+from src.recommendations import (
+    GateContext,
+    LifecycleContext,
+    PublishedRecommendation,
+    PublishedRecommendationRepository,
+    RecommendationGate,
+    RecommendationLifecycleEngine,
+    RecommendationStatus,
+)
 from src.domain import (
     AnalysisEvent,
     ConfidenceState,
@@ -86,6 +97,7 @@ from src.engines.location import LocationEngine
 from src.engines.trend import TrendEngine
 from src.engines.pump_risk import PumpRiskEngine
 from src.engines.breakout_lifecycle import BreakoutLifecycleEngine
+from src.engines.short_squeeze import ShortSqueezeEngine
 from src.engines.trade_plan import STATUS_ACTIVE, TradePlan, TradePlanEngine
 from src.simulation import (
     DecisionSnapshotService,
@@ -242,6 +254,12 @@ class SymbolRuntimeState:
     spot_perp_state: dict[str, Any] = field(default_factory=dict)
     # V1.3 §11 稳定决策快照（DecisionSnapshotService 冻结；{frozen_at, decision}）
     decision_snapshot: dict[str, Any] = field(default_factory=dict)
+    # V1.4 §十三：Short Squeeze 生命周期结果（SHORT_CROWDING→...→EXIT + short_crowding_score）
+    short_squeeze: dict[str, Any] = field(default_factory=dict)
+    # V1.4 §三/§四：Recommendation Gate 最近一次 5m 决策窗口评估结果（诊断/UI）
+    gate_result: dict[str, Any] | None = None
+    # V1.4 §二：当前活跃正式推荐 id（发布后置位；退出后由 Supervisor 清理）
+    recommendation_id: str | None = None
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -456,6 +474,7 @@ class DeepScanner:
         self._kline: KlineCollector | None = None
         self._oi: OIPoller | None = None
         self._funding: FundingPremiumCollector | None = None
+        self._ls_ratio: LongShortRatioCollector | None = None  # V1.4 §二十三 多空比
         self._spot: AggTradeCollector | None = None  # V1.2 §9 现货 aggTrade
         self._spot_symbols: list[str] = []  # 有现货的 deep symbols
         self._trade_q: asyncio.Queue | None = None
@@ -530,6 +549,9 @@ class DeepScanner:
         if self._funding:
             for sym in syms:
                 self._funding.add_symbol(sym)
+        if self._ls_ratio:
+            for sym in syms:
+                self._ls_ratio.add_symbol(sym)   # V1.4 §二十三
 
         logger.info("deep_scanner_added symbols=%s total=%d", syms, len(self.symbols) + len(syms))
 
@@ -549,6 +571,9 @@ class DeepScanner:
         if self._funding:
             for sym in syms:
                 self._funding.remove_symbol(sym)
+        if self._ls_ratio:
+            for sym in syms:
+                self._ls_ratio.remove_symbol(sym)   # V1.4 §二十三
 
         # watchdog 注销
         for sym in syms:
@@ -607,6 +632,15 @@ class DeepScanner:
             clock=self.runtime.clock,
             on_snapshot=self._on_funding,
         )
+        # V1.4 §二十三：多空比采集器（普通户 / 大户账户 / 大户持仓，慢速 REST context）
+        self._ls_ratio = LongShortRatioCollector(
+            symbols=self.symbols,
+            rate_limiter=self.runtime.rate_limiter,
+            base_url=rest_base,
+            poll_interval_s=180.0,
+            clock=self.runtime.clock,
+            on_snapshot=self._on_ls_ratio,
+        )
         # V1.2 §9 现货 aggTrade（仅有现货的 symbol）
         if self.cfg.app.enable_spot:
             self._spot_symbols = [
@@ -632,6 +666,7 @@ class DeepScanner:
         await self._kline.start()
         await self._oi.start()
         await self._funding.start()
+        await self._ls_ratio.start()   # V1.4 §二十三
         self._running = True
         self._consumer_task = asyncio.create_task(self._consume_trades())
         logger.info("deep_scanner_started symbols=%d kline_intervals=%s spot=%d",
@@ -657,10 +692,10 @@ class DeepScanner:
         for c in (self._aggtrade, self._kline, self._spot):
             if c:
                 await c.stop()
-        for c in (self._oi, self._funding):
+        for c in (self._oi, self._funding, self._ls_ratio):
             if c:
                 await c.stop()
-        self._aggtrade = self._kline = self._oi = self._funding = self._spot = None
+        self._aggtrade = self._kline = self._oi = self._funding = self._ls_ratio = self._spot = None
         self._trade_q = None
         self._spot_q = None
 
@@ -708,6 +743,10 @@ class DeepScanner:
         self.runtime.repository.save_funding_snapshot(event)
         sid = f"{STREAM_FUNDING}:{event.symbol}"
         self.runtime.watchdog.record_event(sid, event.event_time, event.receive_time)
+
+    async def _on_ls_ratio(self, event) -> None:
+        """V1.4 §二十三：多空比快照 → 特征引擎（三个指标严格区分）。"""
+        self.runtime.feature_engine.add_long_short_ratio(event)
 
     async def _consume_trades(self) -> None:
         """消费 trade queue → FeatureEngine.add_trade + watchdog。"""
@@ -845,6 +884,7 @@ class MarketRadarRuntime:
         self.trend_engine = TrendEngine()
         self.pump_risk_engine = PumpRiskEngine()
         self.breakout_lifecycle_engine = BreakoutLifecycleEngine()
+        self.short_squeeze_engine = ShortSqueezeEngine()   # V1.4 §十三 Short Squeeze 专项
         self.trade_plan_engine = TradePlanEngine()
         # V1.3 §5-§10 状态监督：池派生映射 + state-aware 监督引擎
         self.supervisor = SupervisorEngine(cfg.supervision)
@@ -875,6 +915,13 @@ class MarketRadarRuntime:
         self.simulation_stats = SimulationStatistics()
         # §19/§22 快照去重：symbol → 已冻结快照的 trade_plan_id 集合
         self._snapshot_plan_ids: dict[str, set[str]] = {}
+        # V1.4 §三-§四：正式推荐门禁 + 发布仓库 + 5m 决策边界跟踪
+        self.recommendation_gate = RecommendationGate(cfg.recommendation)
+        self.published_repo = PublishedRecommendationRepository(storage=self.repository)
+        # V1.4 §六：发布后生命周期管理（Supervisor 真正接管已发布推荐）
+        self.lifecycle_engine = RecommendationLifecycleEngine(cfg.recommendation)
+        # 每 symbol 最近一次已评估的 5m K 线 open_time（§四：发布决策绑定新 5m 收盘）
+        self._last_gate_bar: dict[str, int] = {}
         # V1.3 §48 重启保留：恢复 队列 / 持仓（内存态），并预置快照去重集合
         self._restore_simulation_state()
 
@@ -1159,6 +1206,26 @@ class MarketRadarRuntime:
         # 2. feature
         snap = self.feature_engine.compute_snapshot(symbol, now)
 
+        # 2.5 V1.4 §五：结构 + VP + 突破生命周期必须先于 StateMachine 计算，
+        #     使 5m breakout_confirmed 成为真实门禁输入，而不是展示字段。
+        #     StateMachine.process 仅消费 FeatureSnapshot+confidence，不消费突破状态，
+        #     因此先算 Breakout 不会改变 StateMachine 行为（行为安全）。
+        fv_dict = {k: (v.value if v.available else None) for k, v in snap.features.items()}
+        current_price = self.universe.get_ticker(symbol).get("last_price", 0.0)
+        klines_15m = self.feature_engine.get_kline_history(symbol, "15m")
+        struct = self.structure_engine.compute(klines_15m, current_price=current_price)
+        vp = self.volume_profile_engine.compute(klines_15m)
+        kline_5m_state = self.feature_engine.get_state(symbol).klines.get("5m")
+        breakout = self.breakout_lifecycle_engine.update(
+            symbol, now,
+            breakout_level=struct.breakout_level,
+            current_price=current_price or None,
+            kline_5m=kline_5m_state,
+            context_15m=fv_dict.get("context_15m"),
+            context_1h=fv_dict.get("context_1h"),
+            fv=fv_dict,
+        )
+
         # 3. state machine
         event = self.state_machine.process(snap, now)
 
@@ -1234,14 +1301,7 @@ class MarketRadarRuntime:
         stale_fv = snap.features.get("stale_flag")
         st.stale_flag = stale_fv.value if stale_fv and stale_fv.available else 0.0
 
-        # ── V1.2 行为引擎 ──
-        fv_dict = {k: (v.value if v.available else None) for k, v in snap.features.items()}
-        current_price = self.universe.get_ticker(symbol).get("last_price", 0.0)
-
-        # 结构 + VP（from kline history）
-        klines_15m = self.feature_engine.get_kline_history(symbol, "15m")
-        struct = self.structure_engine.compute(klines_15m, current_price=current_price)
-        vp = self.volume_profile_engine.compute(klines_15m)
+        # ── V1.2 行为引擎（fv_dict/struct/vp/breakout 已在 §2.5 先行计算）──
         st.structure_state = struct.to_dict()
 
         # 吸筹 / 派发 / 复活 / 冲量 / Pump
@@ -1274,18 +1334,13 @@ class MarketRadarRuntime:
         st.setup_type = setup.setup_type
         st.setup_label = setup.label
 
-        # 突破生命周期
-        kline_5m_state = self.feature_engine.get_state(symbol).klines.get("5m")
-        breakout = self.breakout_lifecycle_engine.update(
-            symbol, now,
-            breakout_level=struct.breakout_level,
-            current_price=current_price or None,
-            kline_5m=kline_5m_state,
-            context_15m=fv_dict.get("context_15m"),
-            context_1h=fv_dict.get("context_1h"),
-            fv=fv_dict,
-        )
+        # 突破生命周期已随结构/VP 在 §2.5 先行更新（先于 StateMachine，成为门禁输入）
         st.breakout_state = breakout.to_dict()
+
+        # V1.4 §十三：Short Squeeze 专项生命周期（消费 fv_dict + 突破状态；纯证据，不触发下单）
+        squeeze = self.short_squeeze_engine.update(
+            symbol, now, fv_dict, breakout.to_dict())
+        st.short_squeeze = squeeze.to_dict()
 
         # 位置
         location = self.location_engine.compute(current_price or None, fv_dict,
@@ -1374,6 +1429,11 @@ class MarketRadarRuntime:
                 event.direction.value if event.direction else "-", len(event.evidence), len(event.vetoes),
             )
 
+        # V1.4 §五：Recommendation Gate → Published Recommendation（先于 Supervisor）
+        self._gate_and_publish(symbol, now, current_price, fv_dict, sig_bd, breakout)
+        # V1.4 §六：Supervisor 真正接管已发布推荐的生命周期（状态转移 / 退出）
+        self._supervise_published(symbol, now, current_price, sig_bd)
+
         # V1.3 §5-§10 状态监督：更新监督池元数据（派生标签来自 setup_type）
         labels: list[str] = []
         if st.setup_type == "DISTRIBUTION":
@@ -1414,6 +1474,194 @@ class MarketRadarRuntime:
             "trade_plan": st.trade_plan,
         }
         st.decision_snapshot = self.decision_snapshot_service.update(symbol, now, decision)
+
+    # ── V1.4 §三-§四：Recommendation Gate / 5m 决策边界 / 正式推荐发布 ──
+
+    def _gate_and_publish(
+        self, symbol: str, now_ms: int, current_price: float,
+        fv_dict: dict[str, Any], sig_bd,
+        breakout: Any,
+    ) -> None:
+        """V1.4 §四/§五：仅在新 5m 收盘决策窗口评估正式推荐门禁，通过则发布。
+
+        - 背景实时扫描（1s 价格 / 2s 资金流 / 2s OI / 实时 CVD）不触发发布；
+          发布决策绑定新 5m 收盘（§四）。
+        - Hard Veto / Invalidation / Withdrawal 属 Supervisor 即时路径（§六/§八），
+          不在此等待（§四.4）。
+        """
+        st = self.get_state(symbol)
+        kline_5m = self.feature_engine.get_state(symbol).klines.get("5m")
+        if kline_5m is None or not kline_5m.is_closed:
+            return  # 未收盘：不在 5m 决策窗口
+        bar_open = kline_5m.open_time
+        if self._last_gate_bar.get(symbol) == bar_open:
+            return  # 同一 5m 收盘窗口只评估一次（§四 决策边界）
+        self._last_gate_bar[symbol] = bar_open
+
+        plan = st.trade_plan or {}
+        sig_dict = sig_bd.to_dict() if sig_bd is not None else {}
+        bo_dict = breakout.to_dict() if breakout is not None else {}
+        ctx = GateContext(
+            state=st.state.value,
+            setup_type=st.setup_type,
+            opportunity_score=st.opportunity_score if st.score_available else None,
+            signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
+            data_confidence=st.data_confidence if st.data_confidence_available else None,
+            trade_plan=plan or None,
+            pump_risk=st.pump_risk,
+            stale_flag=st.stale_flag,
+            direction=st.direction.value if st.direction else None,
+            hard_veto=(not bool(sig_dict.get("veto_passed", True))) if st.signal_confirmation_available else False,
+            five_min_closed=True,
+            breakout_confirmed=bo_dict.get("breakout_confirmed"),
+            core_passed=int(sig_dict.get("core_passed", 0) or 0),
+            core_total=int(sig_dict.get("core_total", 0) or 0),
+            aux_passed=int(sig_dict.get("supporting_passed", 0) or 0),
+            aux_total=int(sig_dict.get("supporting_total", 0) or 0),
+            breakout_hold=bo_dict.get("breakout_hold"),
+            retest_confirmed=bo_dict.get("retest_confirmed"),
+            second_impulse_confirmed=bo_dict.get("second_impulse_confirmed"),
+            context_15m=fv_dict.get("context_15m"),
+            context_1h=fv_dict.get("context_1h"),
+            spot_perp_agreement=fv_dict.get("spot_perp_agreement"),
+        )
+        res = self.recommendation_gate.evaluate(ctx)
+        st.gate_result = res.to_dict()
+        if not res.passed:
+            return
+        self._publish_recommendation(symbol, now_ms, current_price, plan, res)
+
+    def _publish_recommendation(
+        self, symbol: str, now_ms: int, current_price: float,
+        plan: dict[str, Any], res,
+    ) -> None:
+        """§三/§九/§三十四：发布一条正式推荐（仅 LIVE；同 symbol 单活跃；30m 冷却）。"""
+        st = self.get_state(symbol)
+        if self.system_mode != SystemMode.LIVE:
+            return
+        if self.published_repo.active_by_symbol(symbol) is not None:
+            return  # 同 symbol 已有活跃推荐，不重复发布（§九）
+        direction = st.direction.value if st.direction else None
+        if self._in_recommendation_cooldown(symbol, direction, st.setup_type, now_ms):
+            return  # §三十四：同 symbol+方向+Setup 30m 冷却
+        opp = st.opportunity_score if st.score_available else None
+        sig = st.signal_confirmation if st.signal_confirmation_available else None
+        dc = st.data_confidence if st.data_confidence_available else None
+        rec = PublishedRecommendation(
+            recommendation_id=f"REC-{uuid.uuid4().hex[:12].upper()}",
+            symbol=symbol,
+            created_at=now_ms,
+            published_at=now_ms,
+            side=direction,
+            setup_type=st.setup_type,
+            primary_timeframe="15m",
+            published_state=st.state.value,
+            current_state=st.state.value,
+            published_price=current_price or None,
+            current_price=current_price or None,
+            published_opportunity_score=opp,
+            published_signal_confirmation=sig,
+            published_data_confidence=dc,
+            current_opportunity_score=opp,
+            current_signal_confirmation=sig,
+            current_data_confidence=dc,
+            entry_zone_low=plan.get("reference_entry_low"),
+            entry_zone_high=plan.get("reference_entry_high"),
+            invalidation_price=plan.get("invalidation_price"),
+            tp1=plan.get("tp1"), tp2=plan.get("tp2"), tp3=plan.get("tp3"),
+            rr1=plan.get("rr_tp1"), rr2=plan.get("rr_tp2"), rr3=plan.get("rr_tp3"),
+            status=RecommendationStatus.PUBLISHED,
+            risk_status="NORMAL",
+            confirmation_level=res.confirmation_level or "STANDARD",
+            updated_at=now_ms,
+        )
+        self.published_repo.save(rec)
+        st.recommendation_id = rec.recommendation_id
+        self.lifecycle_engine.register(rec, now_ms)   # §六：注册到 Supervisor 生命周期
+        logger.info(
+            "[recommendation] %s 发布正式推荐 %s (%s, %s) opp=%s sig=%s conf=%s",
+            symbol, rec.recommendation_id, st.setup_type, rec.confirmation_level, opp, sig, dc,
+        )
+
+    def _in_recommendation_cooldown(
+        self, symbol: str, direction: str | None, setup_type: str, now_ms: int,
+    ) -> bool:
+        """§三十四：同 symbol+方向+Setup 冷却期内禁止重复发布（新 Setup/方向可立即发布）。"""
+        cd_ms = int(self.cfg.recommendation.recommendation_cooldown_s * 1000)
+        for rec in self.published_repo.list_recent(limit=100):
+            if rec.symbol != symbol:
+                continue
+            if rec.side != direction or rec.setup_type != setup_type:
+                continue
+            if now_ms - rec.published_at < cd_ms:
+                return True
+        return False
+
+    def _supervise_published(
+        self, symbol: str, now_ms: int, current_price: float, sig_bd,
+    ) -> None:
+        """§六：驱动该 symbol 当前活跃正式推荐的生命周期评估（状态转移 / 退出）。
+
+        - 每个计算 tick 推进一次：更新 current_*，按 §八/§三十三/§四.4 决定状态。
+        - 立即退出（Hard Veto / Withdrawal / Invalidation / Data Critical）无需等待 5m 收盘。
+        - 生命周期间隔由调用方节奏（compute loop）驱动；非 LIVE 无活跃推荐，等价 no-op。
+        """
+        rec = self.published_repo.active_by_symbol(symbol)
+        if rec is None:
+            return  # 该 symbol 当前无活跃正式推荐
+        if rec.is_terminal():
+            return  # 终态：不再转移
+        st = self.get_state(symbol)
+        sig_dict = sig_bd.to_dict() if sig_bd is not None else {}
+        plan = st.trade_plan or {}
+        # 价格触及失效位 → 即时 Invalidation（§四.4）
+        invalidated = False
+        inv = rec.invalidation_price or plan.get("invalidation_price")
+        if inv is not None and current_price:
+            if rec.side == "LONG" and current_price <= inv:
+                invalidated = True
+            elif rec.side == "SHORT" and current_price >= inv:
+                invalidated = True
+        # 风险池标签（§七.6）：EXHAUSTION / DISTRIBUTION
+        risk_status: str | None = None
+        if st.state == State.EXHAUSTION:
+            risk_status = "EXHAUSTION"
+        elif st.setup_type == "DISTRIBUTION" or (st.distribution_risk or 0) >= 60:
+            risk_status = "DISTRIBUTION"
+        # 数据严重异常：data_confidence 远破门禁门槛 或 核心流断线
+        dc = st.data_confidence if st.data_confidence_available else None
+        data_critical = (
+            (dc is not None and dc < self.cfg.recommendation.min_data_confidence - 25)
+            or st.confidence_state == ConfidenceState.UNKNOWN
+        )
+        ctx = LifecycleContext(
+            now_ms=now_ms,
+            current_price=current_price or None,
+            current_state=st.state.value,
+            current_opportunity_score=st.opportunity_score if st.score_available else None,
+            current_signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
+            current_data_confidence=dc,
+            hard_veto=(not bool(sig_dict.get("veto_passed", True))) if st.signal_confirmation_available else False,
+            withdrawal_active=st.state == State.WITHDRAWAL,
+            invalidated=invalidated,
+            data_critical=data_critical,
+            risk_status=risk_status,
+            in_formal_range=st.state.value in FORMAL_STATES,
+        )
+        decision = self.lifecycle_engine.tick(rec, ctx)
+        self.published_repo.save(rec)   # 持久化 current_* / status 变更
+        if decision.exited:
+            st.recommendation_id = None  # 退出首页活跃区
+            logger.info(
+                "[recommendation] %s 退出 %s %s（%s）",
+                symbol, rec.recommendation_id, rec.status.value, rec.exit_reason,
+            )
+        elif decision.transitioned:
+            logger.info(
+                "[recommendation] %s 状态转移 → %s（%s）",
+                symbol, decision.new_status.value if decision.new_status else rec.status.value,
+                decision.reason,
+            )
 
     def _maybe_create_snapshot(self, symbol: str, now: int, current_price: float) -> None:
         """§22：过 Top 门槛的正式推荐 → 冻结不可变快照 → WATCHING 入队。
@@ -1689,7 +1937,18 @@ class MarketRadarRuntime:
             "structure_state": s.structure_state,
             "spot_perp_state": s.spot_perp_state,
             "simulation": self._symbol_drawer_simulations(symbol),
+            # V1.4 §十二.3 Drawer Setup 专项屏（Short Squeeze 生命周期 + 拥挤度 + 逼空强度）
+            "short_squeeze": s.short_squeeze,
+            # V1.4 §十二：该 symbol 当前活跃正式推荐（发布快照 + 当前监督值）
+            "published_recommendation": self._symbol_published_rec(symbol),
         }
+
+    def _symbol_published_rec(self, symbol: str) -> dict[str, Any] | None:
+        """§十二 Drawer：该 symbol 当前活跃正式推荐（无则 None）。"""
+        rec = self.published_repo.active_by_symbol(symbol)
+        if rec is None:
+            return None
+        return rec.to_dict()
 
     def _symbol_drawer_simulations(self, symbol: str) -> list[dict[str, Any]]:
         """§51 Drawer 模拟状态：该 symbol 最近最多 3 条模拟（队列 + 持仓 + 结果）。"""
@@ -1889,11 +2148,64 @@ class MarketRadarRuntime:
 
     # ── V1.3 P2 API（§63–§65）：首页 / 市场 / 监督台 / 模拟验证 ──
 
+    def get_published_recommendations(self) -> list[dict[str, Any]]:
+        """§十.2 首页正式机会 = PublishedRecommendationRepository.active()（§九：0~N 真实存在）。
+
+        - 首页不再读取实时 Top10 排名（§一/§九）；正式推荐是「发布后被持续监督的一条机会」。
+        - published_* 冻结 / current_* 持续更新（§二十七/§三十三），供 §55/§56 双值显示。
+        - 卡片字段精简（§十一）；完整评分放 Drawer（§十二）。
+        """
+        out: list[dict[str, Any]] = []
+        now = self.clock.now_ms()
+        for rec in self.published_repo.active():
+            st = self.latest_state.get(rec.symbol)
+            ticker = self.universe.get_ticker(rec.symbol)
+            current_price = ticker.get("last_price", 0.0) or rec.current_price
+            # §11 卡片：资金输入 / 逼空强度 / 即时续航 / 追涨安全 / 撤离风险（实时小评分）
+            subscores: dict[str, Any] = {}
+            for k, v in ((st.score_breakdown or {}).get("subscores") or {}).items() if st else []:
+                if k in ("capital_inflow", "immediate_stamina", "chase_safety",
+                         "withdrawal_risk") and isinstance(v, dict) and v.get("available"):
+                    subscores[k] = round(v.get("score") or 0.0, 1)
+            out.append({
+                "recommendation_id": rec.recommendation_id,
+                "symbol": rec.symbol,
+                "side": rec.side,
+                "setup_type": rec.setup_type,
+                "confirmation_level": rec.confirmation_level,
+                "status": rec.status.value,
+                "risk_status": rec.risk_status,
+                "current_price": current_price,
+                "price_change_24h": (st.price_change_24h if st else 0.0),
+                "published_price": rec.published_price,
+                "published_at": rec.published_at,
+                "tracked_s": max(0.0, (now - rec.published_at) / 1000.0),
+                # §三十三 双值显示
+                "published_opportunity_score": rec.published_opportunity_score,
+                "current_opportunity_score": rec.current_opportunity_score,
+                "published_signal_confirmation": rec.published_signal_confirmation,
+                "current_signal_confirmation": rec.current_signal_confirmation,
+                "published_data_confidence": rec.published_data_confidence,
+                "current_data_confidence": rec.current_data_confidence,
+                # §11 计划摘要（完整评分放 Drawer）
+                "entry_zone_low": rec.entry_zone_low,
+                "entry_zone_high": rec.entry_zone_high,
+                "invalidation_price": rec.invalidation_price,
+                "tp1": rec.tp1, "tp2": rec.tp2, "tp3": rec.tp3,
+                "rr1": rec.rr1, "rr2": rec.rr2, "rr3": rec.rr3,
+                "live_subscores": subscores,
+                "summary": (st.summary if st else ""),
+                "exit_reason": rec.exit_reason,
+            })
+        return out
+
     def get_home(self) -> dict[str, Any]:
         """§64 首页 API — 返回稳定决策快照，不返回每秒变动的底层 Score。
 
-        - confirmed_opportunities：正式 Top 机会（§13 门槛 + LIVE 门控）；每行附带
-          decision_snapshot（§11 冻结 {frozen_at, decision}）与实时值，供 §55/§56 双值显示。
+        - published_recommendations：§十.2 正式机会 = PublishedRecommendationRepository.active()
+          （§九：0~N 真实存在，不再强行 Top10）。
+        - confirmed_opportunities：实时 Top 机会（§13 门槛 + LIVE 门控），供『重点确认』补充；
+          每行附带 decision_snapshot（§11 冻结 {frozen_at, decision}）与实时值。
         - watch_candidates：§14 正在观察（ANOMALY / SUSPECTED_START，最多 watch_max_items 条）。
         - risk_candidates：RISK / EXIT 池中高风险标的（Pump / 派发 / 撤离）。
         """
@@ -1925,6 +2237,7 @@ class MarketRadarRuntime:
         return {
             "market_regime": self.market_regime.to_dict() if self.market_regime else None,
             "health": self.get_health_coverage(),
+            "published_recommendations": self.get_published_recommendations(),
             "confirmed_opportunities": confirmed,
             "watch_candidates": self._watch_candidates(),
             "risk_candidates": self._risk_candidates(),

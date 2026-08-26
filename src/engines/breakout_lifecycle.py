@@ -45,6 +45,8 @@ class BreakoutState:
     retest_oi: float | None = None
     # 阶段 4：二次确认
     retest_confirmed: bool = False
+    # 二次冲量确认（V1.4 §3.2 强确认：回踩健康后价格重新越过突破位）
+    second_impulse_confirmed: bool = False
     # 强确认
     strong_confirm: bool = False
     # 最后更新
@@ -69,6 +71,7 @@ class BreakoutLifecycleResult:
     strong_confirm: bool
     confirmation_strength: str  # strong / medium / weak / none
     label: str
+    second_impulse_confirmed: bool = False
     factors: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,6 +87,7 @@ class BreakoutLifecycleResult:
             "retest_started": self.retest_started,
             "retest_depth": self.retest_depth,
             "retest_confirmed": self.retest_confirmed,
+            "second_impulse_confirmed": self.second_impulse_confirmed,
             "strong_confirm": self.strong_confirm,
             "confirmation_strength": self.confirmation_strength,
             "label": self.label,
@@ -156,6 +160,10 @@ class BreakoutLifecycleEngine:
         if st.retest_started:
             self._check_second_confirmation(st, fv, now_ms)
 
+        # ── 阶段 4b：二次冲量确认（V1.4 §3.2 强确认第六项）──
+        if st.retest_started and current_price is not None:
+            self._check_second_impulse(st, current_price)
+
         # ── 强确认（§15.5）──
         st.strong_confirm = self._check_strong(st, context_15m, context_1h, fv)
 
@@ -182,6 +190,7 @@ class BreakoutLifecycleEngine:
             retest_started=st.retest_started,
             retest_depth=st.retest_depth,
             retest_confirmed=st.retest_confirmed,
+            second_impulse_confirmed=st.second_impulse_confirmed,
             strong_confirm=st.strong_confirm,
             confirmation_strength=strength,
             label=label,
@@ -209,6 +218,7 @@ class BreakoutLifecycleEngine:
                 st.close_back_inside = False
                 st.retest_started = False
                 st.retest_confirmed = False
+                st.second_impulse_confirmed = False
         # 向下突破：收盘价 < level
         elif close < level:
             if not st.breakout_confirmed or st.breakout_direction != "down":
@@ -222,6 +232,7 @@ class BreakoutLifecycleEngine:
                 st.close_back_inside = False
                 st.retest_started = False
                 st.retest_confirmed = False
+                st.second_impulse_confirmed = False
 
     def _check_hold(self, st: BreakoutState, current_price: float, now_ms: int, fv: dict[str, Any]) -> None:
         """突破保持：价格在突破位正确侧的时间 + 回撤控制。"""
@@ -297,6 +308,21 @@ class BreakoutLifecycleEngine:
             flow_reignite = flow_reignite or (cvd_z * sign > 0)
 
         st.retest_confirmed = depth_ok and oi_ok and (sell_decay or flow_reignite)
+
+    def _check_second_impulse(self, st: BreakoutState, current_price: float) -> None:
+        """二次冲量确认（V1.4 §3.2 强确认）：回踩二次确认通过后，价格重新越过原突破位
+
+        表示资金二次推动（second impulse）成立；回踩尚未确认时不置位。
+        """
+        if not st.retest_confirmed:
+            return
+        bp = st.breakout_price
+        if bp is None:
+            return
+        if st.breakout_direction == "up":
+            st.second_impulse_confirmed = current_price > bp
+        elif st.breakout_direction == "down":
+            st.second_impulse_confirmed = current_price < bp
 
     def _check_strong(self, st: BreakoutState, context_15m: float | None, context_1h: float | None, fv: dict[str, Any]) -> bool:
         """强确认：5m 突破确认 + 15m 同向 + 1h 不逆向。"""

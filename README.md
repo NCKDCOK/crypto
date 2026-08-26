@@ -29,9 +29,22 @@
 
 ## 项目状态
 
-🟢 **V1.3 已落地 — 状态监督 × 模拟验证 × UI 重构**（含 V1.1 / V1.2 全部能力）
+🟢 **V1.4 已落地 — 正式推荐生命周期修复 + 状态监督闭环 + Short Squeeze 专项 Setup**（含 V1.1 / V1.2 / V1.3 全部能力）
 
-### V1.3 新增（最新）
+### V1.4 新增（最新）
+
+> 目标：彻底解决首页推荐频繁更换/状态抖动；在稳定推荐生命周期之上新增第一套完整专项 Setup（Short Squeeze / 山寨币轧空）。系统仍只做市场分析/提醒/模拟验证，**不自动下单**。
+
+| 模块 | 说明 |
+|---|---|
+| **正式推荐生命周期** | `PublishedRecommendation` 独立实体（PUBLISHED→MONITORING⇄WEAKENING→RISK→终态）；`RecommendationGate` 门禁（标准确认 §3.1 + 强确认 §3.2 六项）；发布绑定 **5m 收盘决策边界**（突破类须 `breakout_confirmed`）；突破生命周期先于 StateMachine 计算（5m 真突破成为门禁而非展示字段）；最低驻留 + 同向同 Setup 30m 冷却防重复发布；首页不再强行 Top10，0 条即显示 0 条 |
+| **Supervisor 接管推荐** | `RecommendationLifecycleEngine` 真正管理已发布推荐：即时退出（Hard Veto / Withdrawal / Invalidation / Data Critical，绕过滞回+驻留）；普通降级需连续 N 次离开正式范围（配置化）；score 抖动 → WEAKENING 不删除 |
+| **Short Squeeze 专项** | `ShortSqueezeEngine` 完整生命周期（空头拥挤→轧空蓄势→轧空触发→加速逼空→逼空尾声→退出）；`short_crowding_score`（Funding 极值+Premium+普通户偏空+OI 扩张共振，禁止仅 Funding 负触发）；分类新增多头（Price↑OI↑）vs 空头回补（Price↑OI↓）；`squeeze_strength` 逼空强度；`positioning_divergence_score` 普通户 vs 大户分歧（仅 Evidence，禁止「庄家做多」解读） |
+| **Funding / OI 专项升级** | `funding_zscore`（robust baseline，取代固定阈值）+ `funding_percentile_7d/30d`；`oi_zscore` + 既有 `oi_change_abs/pct_{5m,15m,1h}`/velocity/acceleration |
+| **Long/Short Ratio 采集** | 三个指标严格区分（普通户 / 大户账户 / 大户持仓多空比），禁止混为同一个 `long_short_ratio`；`delta_ratio=(buy-sell)/(buy+sell)` 与 `taker_buy_sell_ratio=buy/sell` 严格区分 |
+| **首页 + Drawer** | 首页 `published_recommendations` 读 `PublishedRecommendationRepository`（0~N 真实存在，双值 published_*/current_* + 计划摘要）；Drawer 新增 `short_squeeze` Setup 专项屏 + `published_recommendation` 引用 |
+
+### V1.3 新增
 
 | 模块 | 说明 |
 |---|---|
@@ -71,7 +84,8 @@
 | aggTrade (WS) | ✅ LIVE | 实时成交、aggressor side、CVD、taker delta、trade_id 去重 |
 | Kline 1m/5m/15m/1h (WS) | ✅ LIVE | 多周期订阅 |
 | Open Interest (REST) | ✅ LIVE | 基础资产数量、Δ30s/1m/5m、velocity、accel；变化统一 1h 口径、pct 展示 |
-| Funding/Premium (REST) | ✅ LIVE | 拥挤度上下文、soft veto |
+| Funding/Premium (REST) | ✅ LIVE | 拥挤度上下文、soft veto；`funding_zscore`/percentile 取代固定阈值（V1.4） |
+| Long/Short Ratio (REST) | ✅ LIVE | 普通户/大户账户/大户持仓多空比三指标严格区分（V1.4 §二十三），Short Squeeze evidence |
 | 24h ticker (REST) | ✅ LIVE | 动态 universe 发现 + Stage1 短时增量扫描 |
 | Spot aggTrade | ✅ LIVE | 现货成交/volume/CVD/taker/delta（V1.2），spot×perp 一致性 |
 
@@ -105,7 +119,7 @@ uvicorn src.main:app --host 127.0.0.1 --port 8050
 ## 如何测试
 
 ```bash
-pytest -q                                          # 全量离线测试（728 passed）
+pytest -q                                          # 全量离线测试（822 passed）
 python scripts/live_smoke_test.py --duration 600   # 10 分钟 live 冒烟
 python scripts/ui_seed_server.py 8051              # UI 冒烟种子服务器（Playwright 目标，端口 8051）
 ```
@@ -116,13 +130,13 @@ python scripts/ui_seed_server.py 8051              # UI 冒烟种子服务器（
 
 | 页面 | 路由 | 功能 |
 |---|---|---|
-| **首页** | `#/` | top-stats 六字段（市场背景/数据健康/Universe/重点观察/确认机会/风险中）+ Top Opportunities（≤10，不凑满）+ 正在观察/风险中 |
+| **首页** | `#/` | 市场背景/数据健康 + **正式机会（Published Recommendations，0~N 真实存在）**（V1.4）+ Top Opportunities（≤10，不凑满）+ 正在观察/风险中 |
 | **全市场** | `#/market` | 搜索 + 状态筛选 + 多维排序 + 全量表格 |
 | **监督台** | `#/supervision` | 6 列 Kanban（异动观察/等待确认/确认机会/趋势跟踪/风险/撤离），每币独立监督问题，点击卡片看监督详情 + 状态日志时间线 |
 | **模拟验证** | `#/simulations` | 5 Tab：等待入场 / 运行中 / 已结束 / 统计（推荐次数/入场/TP1率/平均MFE/MAE/Setup 分组）/ 历史回放（动态退出 vs 固定 TP/Stop） |
 | **数据健康** | `#/health` | 覆盖率大条 + 交易对×流明细 + 核心流中断横幅 |
 
-任意卡片点击 → **侧滑 Drawer（A–I 九区块）**：当前结论 / 核心评分双值（推荐时→当前）/ 当前计划（关注区·失效位·TP1-3·R:R）/ 生命周期 / 评分明细 / 资金摘要（OI 5m·15m·1h 等 11 项）/ 突破生命周期 / Evidence-Veto / 模拟状态。
+任意卡片点击 → **侧滑 Drawer（A–I 九区块）**：当前结论 / 核心评分双值（推荐时→当前）/ 当前计划（关注区·失效位·TP1-3·R:R）/ 生命周期 / 评分明细 / 资金摘要（OI 5m·15m·1h 等 11 项）/ 突破生命周期 / Evidence-Veto / 模拟状态 / **Short Squeeze 专项屏**（生命周期 + 拥挤度 + 逼空强度 + 普通户 vs 大户分歧，V1.4）。
 
 轮询节奏（配置化）：价格 4s / 主数据 10s / 慢轮询 30s / Top 重拉 60s；首页有实质变化才重排 DOM（不秒级重排）。
 
@@ -166,20 +180,22 @@ RankingScore    = OpportunityScore × ConfidenceFactor
 
 ```
 src/
-├── collectors/          # 数据采集器（aggTrade/Kline/OI/Funding/Spot WS+REST）
-├── features/            # 特征引擎（多窗口/基线/z-score/CVD/效率）
+├── collectors/          # 数据采集器（aggTrade/Kline/OI/Funding/Spot/LongShortRatio WS+REST）
+├── features/            # 特征引擎（多窗口/基线/z-score/CVD/效率/funding_zscore/oi_zscore）
 ├── detectors/           # 检测器（anomaly/startup/false_start/continuation/withdrawal）
 ├── health/              # 数据健康（freshness/confidence/coverage 覆盖率）  ← V1.1 + V1.3
 ├── market/              # 市场背景 Regime + 结构/Volume Profile/Location    ← V1.2
 ├── state_machine/       # 状态机（SLEEPING→ANOMALY→SUSPECTED→CONFIRMED→...）
 ├── supervision/         # 状态监督（8 池 + 滞回 + 生命周期）                ← V1.3 P1
 ├── simulation/          # 模拟验证（快照/队列/重验证/持仓/动态退出/统计）    ← V1.3 P2
+├── recommendations/    # 正式推荐生命周期（Gate/Lifecycle/Repository/Model）  ← V1.4
+├── engines/             # 行为引擎（accumulation/distribution/breakout/.../short_squeeze）  ← V1.4 Short Squeeze
 ├── scoring/             # 评分引擎（11 子评分 + 机会分 + 置信度引擎）
 ├── presentation/        # 翻译层 + Top10 排名
 ├── storage/             # SQLite 持久化 + 内存仓库                            ← V1.2
 ├── recovery/            # RecoveryManager 三档停机恢复 + SystemMode          ← V1.2
 ├── replay/              # Replay Calibration（分桶校准）                      ← V1.2
-├── runtime.py           # 运行时编排（Radar + 防抖 + 评分 + 快照 + 模拟集成）
+├── runtime.py           # 运行时编排（Radar + 防抖 + 评分 + 推荐门禁 + 生命周期 + 模拟集成）
 └── main.py              # FastAPI 入口 + 静态文件托管
 
 static/                  # 前端 SPA（V1.3 5 页重构）
@@ -189,10 +205,11 @@ static/                  # 前端 SPA（V1.3 5 页重构）
 
 configs/                 # 全部配置（app/symbols/features/detectors/state_machine/
                         #   data_health/hysteresis/scoring/ranking/supervision/
-                        #   simulation/health_coverage）
-tests/                   # 728 测试（scoring/presentation/supervision/simulation/api）
+                        #   simulation/health_coverage/recommendation）
+tests/                   # 822 测试（scoring/presentation/supervision/simulation/
+                        #   recommendations/engines/collectors/api）
 scripts/                 # live_smoke_test.py / ui_seed_server.py（UI 冒烟夹具）
-docs/                    # 设计文档 + UI.md
+docs/                    # 设计文档 + UI.md + V1.4_IMPLEMENTATION_STATUS.md
 ```
 
 ---
@@ -213,6 +230,7 @@ docs/                    # 设计文档 + UI.md
 | `configs/supervision.yaml` | 监督池规则/级别/滞回 ← V1.3 新增 |
 | `configs/simulation.yaml` | 模拟验证参数（Entry Zone/TP/Stop/24h 上限）← V1.3 新增 |
 | `configs/health_coverage.yaml` | 覆盖率阈值（90/70）+ 核心流优先级 ← V1.3 新增 |
+| `configs/recommendation.yaml` | 正式推荐门禁阈值/强确认/5m 边界/最低驻留/冷却 ← V1.4 新增 |
 
 ---
 
@@ -257,6 +275,8 @@ docs/                    # 设计文档 + UI.md
 | [资金行为雷达_V1.1_Runtime修复_评分体系_Top10大屏_UI产品化.md](资金行为雷达_V1.1_Runtime修复_评分体系_Top10大屏_UI产品化.md) | V1.1 完整计划（19 步骤） |
 | [资金行为雷达_V1.2_资金生命周期_结构位置_置信度_TradePlan_修改方案.md](资金行为雷达_V1.2_资金生命周期_结构位置_置信度_TradePlan_修改方案.md) | V1.2 完整计划 |
 | [资金行为雷达_V1.3_状态监督_模拟验证_UI重构_更新计划.md](资金行为雷达_V1.3_状态监督_模拟验证_UI重构_更新计划.md) | V1.3 完整计划（§1-§72） |
+| [crypto_radar_v1.4_fix_update_plan.md](crypto_radar_v1.4_fix_update_plan.md) | V1.4 完整计划（推荐生命周期修复 + Short Squeeze 专项） |
+| [docs/V1.4_IMPLEMENTATION_STATUS.md](docs/V1.4_IMPLEMENTATION_STATUS.md) | V1.4 实现状态（44 节逐项映射 + DoD） |
 
 ---
 

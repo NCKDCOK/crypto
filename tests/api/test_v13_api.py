@@ -79,9 +79,11 @@ class TestHomeAPI:
         _seed_symbol(rt, "BTCUSDT", State.START_CONFIRMED)
         _seed_symbol(rt, "ETHUSDT", State.SUSPECTED_START, labels=["accumulation"])
         home = rt.get_home()
-        assert set(home) == {"market_regime", "health", "confirmed_opportunities",
-                             "watch_candidates", "risk_candidates"}
+        assert set(home) == {"market_regime", "health", "published_recommendations",
+                             "confirmed_opportunities", "watch_candidates", "risk_candidates"}
         assert home["health"] is not None  # 覆盖率 dict
+        # §十.2：首页正式机会读取 PublishedRecommendationRepository（空时为 []，§九允许 0 条）
+        assert home["published_recommendations"] == []
         # §13 正式门槛：START_CONFIRMED + 高分会进 confirmed
         syms = [r["symbol"] for r in home["confirmed_opportunities"]]
         assert "BTCUSDT" in syms

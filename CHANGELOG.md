@@ -1,5 +1,73 @@
 # CHANGELOG
 
+## [V1.4] — 正式推荐生命周期修复 + 状态监督闭环 + Short Squeeze 专项 Setup
+
+依据《crypto_radar_v1.4_fix_update_plan.md》。本轮目标：彻底解决首页推荐频繁更换/状态抖动，
+在稳定推荐生命周期之上新增第一套完整专项 Setup（Short Squeeze）。系统仍只做市场分析/提醒/模拟验证，
+**不做自动下单**。全套 **822 passed**（V1.4 新增 119 用例）。
+
+### 正式推荐生命周期（§一–§六、§三十三、§三十四）
+
+- **PublishedRecommendation 独立实体（§二）**：`src/recommendations/models.py` — 独立生命周期枚举
+  RecommendationStatus（PUBLISHED/MONITORING/WEAKENING/RISK/EXITED/EXPIRED/INVALIDATED），
+  published_* 冻结不可变 / current_* 持续更新（§二十七）；`PublishedRecommendationRepository`
+  为首页数据源（§一.2）。
+- **RecommendationGate 正式门禁（§三）**：`src/recommendations/gate.py` — 标准确认（状态范围/
+  三门槛/5m 收盘/突破类 breakout_confirmed/Hard Veto/Trade Plan/RR/Pump Risk/stale/证据投票 3-3+3-5）
+  + 强确认（§3.2 六项：breakout_hold/retest/second_impulse/15m 对齐/1h 不逆向/spot-perp 一致）。
+  禁止「score>70 即首页推荐」。
+- **5m 决策边界（§四）**：runtime `_gate_and_publish` — 仅新 5m 收盘窗口评估 Gate（`_last_gate_bar`
+  去重）；突破生命周期先于 StateMachine 计算（§五 调用顺序修复），breakout_confirmed 成为真实门禁输入
+  而非展示字段；Hard Veto/Invalidation/Withdrawal 即时路径不等待 5m 收盘（§四.4）。
+- **RecommendationLifecycleEngine（§六）**：`src/recommendations/lifecycle.py` — Supervisor 真正
+  接管已发布推荐：PUBLISHED→MONITORING⇄WEAKENING→RISK→终态。即时退出（Hard Veto/Withdrawal/
+  Invalidation/Data Critical，绕过滞回+驻留）；普通降级需连续 N 次离开正式范围（`lifecycle_downgrade_streak`
+  配置化，§八）；最低驻留 `minimum_published_lifetime`（§三十三）+ score 抖动→WEAKENING 不删除。
+- **推荐成员滞回/冷却（§三十三/§三十四）**：同 symbol 活跃期单活跃去重（§九）+ 同 symbol+方向+Setup
+  30m 冷却（新 Setup/方向可立即重发）；首页不再强行 Top10，0 条即显示 0 条（§九/§十）。
+
+### 首页与 Drawer（§九–§十二）
+
+- **首页读取 PublishedRecommendationRepository（§十）**：`get_home()` 新增 `published_recommendations`
+  字段（0~N 真实存在），卡片字段精简（§十一：双值 published_*/current_* + 计划摘要 + 实时小评分），
+  完整评分放 Drawer。confirmed_opportunities 保留为补充。
+- **Drawer Setup 专项屏（§十二.3）**：`get_symbol_detail` 新增 `short_squeeze`（生命周期/拥挤度/逼空强度）
+  + `published_recommendation`（活跃正式推荐引用），供 Drawer 第三屏动态展示。
+
+### Short Squeeze 专项（§十三–§二十二）
+
+- **ShortSqueezeEngine（§十三/§十四）**：`src/engines/short_squeeze.py` — 完整生命周期
+  SHORT_CROWDING→SQUEEZE_BUILDUP→SQUEEZE_TRIGGER→SQUEEZE_ACCELERATION→SQUEEZE_EXHAUSTION→EXIT。
+- **空头拥挤度（§十五）**：`short_crowding_score` 0~100（Funding 极值+Premium/Basis+普通户偏空+OI 扩张
+  共振），禁止仅 Funding 负触发、禁止翻译成「庄家控盘」。
+- **Funding zscore/percentile（§十六）**：`funding_zscore`（robust baseline）+ `funding_percentile_7d/30d`
+  字段（更长历史优雅降级），取代固定阈值。
+- **OI 专项（§十七）**：`oi_zscore`（robust）+ 既有 `oi_change_abs/pct_{5m,15m,1h}`/velocity/acceleration。
+- **Buildup/Trigger/Acceleration/Exhaustion（§十八–§二十二）**：buildup 需「下跌效率衰减」（卖压大但价格
+  不再有效下跌，§十八）；trigger 需 5m 收盘突破+Taker Buy+CVD+Price Efficiency 共振（§十九）；
+  分类新增多头（Price↑ OI↑）vs 空头回补（Price↑ OI↓，§二十）；acceleration 输出 `squeeze_strength`（§二十一）；
+  exhaustion 不再允许新入场（§二十二）。
+- **Long/Short Ratio 采集（§二十三）**：`src/collectors/long_short_ratio_collector.py` — 三个指标严格区分
+  （global_account_ls / top_trader_account_ls / top_trader_position_ls），禁止混为同一个 long_short_ratio。
+- **普通户 vs 大户分歧（§二十四）**：`positioning_divergence_score`，仅作 Evidence，禁止翻译成「庄家做多」。
+- **Taker B/S 修复（§二十五）**：`delta_ratio=(buy-sell)/(buy+sell)` 与 `taker_buy_sell_ratio=buy/sell`
+  严格区分，FeatureEngine 暴露 `taker_buy_sell_ratio`。
+
+### 配置与测试
+
+- **配置（§三/§八/§三十三/§三十四）**：`configs/recommendation.yaml` + `RecommendationConfig`
+  （门禁阈值/强确认/5m 边界/最低驻留/冷却/`lifecycle_downgrade_streak`/容量），无 magic number。
+- **测试（§四十二）**：新增 119 用例 — Recommendation 36 门禁单元 + 21 边界/发布/接线 + 18 生命周期 +
+  14 Short Squeeze（仅 Funding 不触发 / 强势下跌不误判 / 下跌效率衰减→buildup / 5m 突破→trigger /
+  价格↑ OI↓→acceleration / exhaustion / 新增多头 vs 轧空分类）+ 5 L/S ratio parse + OI zscore。
+- **跨模块接线**：runtime `_compute_symbol` 调用 ShortSqueezeEngine + `_supervise_published`；
+  DeepScanner 集成 LongShortRatioCollector；FeatureEngine 暴露 funding_zscore/L-S ratios/
+  taker_buy_sell_ratio/oi_zscore。
+
+**测试：822 passed，12 warnings（均为既有 TestClock 收集 / 弃用告警）。仅影子/纸面信号，禁止自动交易。**
+
+---
+
 ## [V1.3] — 状态监督 × 模拟验证 × UI 重构（P0 批次）
 
 依据《资金行为雷达_V1.3_状态监督_模拟验证_UI重构_更新计划》。

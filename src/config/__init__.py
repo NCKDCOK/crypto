@@ -321,6 +321,52 @@ class SimulationConfig(BaseModel):
     entry_zone_grace_s: float = Field(default=10.0, gt=0, description="进入关注区后未通过验证的宽限期")
 
 
+class RecommendationConfig(BaseModel):
+    """正式推荐配置（V1.4 §三 ~ §六, §三十三, §三十四）。
+
+    正式推荐（Published Recommendation）与实时排名分离：
+    - 只有通过 RecommendationGate（§三）且在 5m 收盘决策边界（§四）的机会才发布；
+    - 发布后进入独立生命周期（§六），由 Supervisor 驱动；
+    - 最低驻留（§三十三）与同向同 Setup 冷却（§三十四）防重复发布。
+    """
+
+    # ── §3.1 标准确认门槛 ──
+    min_opportunity: float = Field(default=70.0, ge=0, le=100)
+    min_signal_confirmation: float = Field(default=75.0, ge=0, le=100)
+    min_data_confidence: float = Field(default=85.0, ge=0, le=100)
+    max_pump_risk: float = Field(default=50.0, ge=0, le=100, description="pump_risk 高于此值不得发布")
+    minimum_rr: float = Field(default=1.5, ge=0, description="TP1 风险回报比下限")
+    # 证据投票（§3.1 末条：核心 >= 3/3，辅助 >= 3/5）
+    core_min_passed: int = Field(default=3, ge=1)
+    core_min_total: int = Field(default=3, ge=1)
+    aux_min_passed: int = Field(default=3, ge=1)
+    aux_min_total: int = Field(default=5, ge=1)
+    # 突破类 Setup 列表（发布须 breakout_confirmed=true）
+    breakout_require_setups: list[str] = Field(
+        default_factory=lambda: ["BREAKOUT_START", "RETEST_REIGNITION",
+                                 "TREND_CONTINUATION", "SHORT_SQUEEZE"])
+    # ── §3.2 强确认 ──
+    strong_1h_opposite_threshold: float = Field(
+        default=0.5, ge=0, description="1h 趋势与方向相反的强度（% 值）超此值 → 强确认不成立")
+    strong_spot_agreement_min: float = Field(
+        default=0.3, ge=-1, le=1, description="强确认所需现货-合约一致性下限")
+    # ── §四 5m 决策边界 ──
+    five_min_boundary: bool = Field(
+        default=True, description="是否启用『仅新 5m 收盘才评估 Gate』边界（Hard Veto/Invalidation 例外）")
+    # ── §三十三 最低驻留 ──
+    minimum_published_lifetime_s: float = Field(
+        default=300.0, gt=0, description="正式推荐最低驻留时长（一个 5m 周期）；Hard Veto/Invalidation/Withdrawal/Data Critical 例外")
+    # ── §三十四 冷却 ──
+    recommendation_cooldown_s: float = Field(
+        default=1800.0, gt=0, description="同 symbol+方向+Setup 的推荐冷却时长（30m）")
+    # ── §八 普通降级滞回 ──
+    lifecycle_downgrade_streak: int = Field(
+        default=2, ge=1,
+        description="连续 N 次离开正式范围才普通降级退出（§八「连续2个决策窗口失败」）")
+    # ── 容量 ──
+    max_active: int = Field(default=10, ge=1, le=50, description="同时活跃正式推荐上限")
+
+
 class AppConfigBundle(BaseModel):
     """全部配置的聚合。"""
 
@@ -338,6 +384,7 @@ class AppConfigBundle(BaseModel):
     ranking: RankingConfig = Field(default_factory=RankingConfig)
     supervision: SupervisionConfig = Field(default_factory=SupervisionConfig)
     simulation: SimulationConfig = Field(default_factory=SimulationConfig)
+    recommendation: RecommendationConfig = Field(default_factory=RecommendationConfig)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -373,6 +420,7 @@ def load_config(configs_dir: Path) -> AppConfigBundle:
         "ranking": "ranking.yaml",
         "supervision": "supervision.yaml",
         "simulation": "simulation.yaml",
+        "recommendation": "recommendation.yaml",
     }
     raw: dict[str, Any] = {}
     for key, filename in files.items():

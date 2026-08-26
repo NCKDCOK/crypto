@@ -151,6 +151,17 @@ CREATE TABLE IF NOT EXISTS simulation_results (
     result_json TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sr_symbol ON simulation_results(symbol);
+
+-- ── V1.4 正式推荐生命周期（§二）──
+
+CREATE TABLE IF NOT EXISTS published_recommendations (
+    recommendation_id TEXT PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    status TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    rec_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pr_symbol_status ON published_recommendations(symbol, status);
 """
 
 
@@ -388,6 +399,69 @@ class SqliteRepository(Repository):
             logger.exception("sqlite_list_recommendation_snapshots_failed")
             return []
         return [json.loads(r["snapshot_json"]) for r in rows]
+
+    # ── V1.4 正式推荐生命周期持久化（§二 / §二十六）──
+
+    def save_published_recommendation(self, rec: dict[str, Any]) -> None:
+        """保存/更新一条已发布推荐（UPSERT）。"""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT OR REPLACE INTO published_recommendations
+                    (recommendation_id, symbol, status, updated_at, rec_json)
+                    VALUES (?,?,?,?,?)""",
+                    (rec["recommendation_id"], rec["symbol"], rec["status"],
+                     rec.get("updated_at", 0), json.dumps(rec, ensure_ascii=False)),
+                )
+                self._conn.commit()
+        except Exception:
+            logger.exception("sqlite_save_published_recommendation_failed id=%s",
+                             rec.get("recommendation_id"))
+
+    def get_published_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:
+        try:
+            with self._lock:
+                row = self._conn.execute(
+                    "SELECT * FROM published_recommendations WHERE recommendation_id=?",
+                    (recommendation_id,),
+                ).fetchone()
+        except Exception:
+            logger.exception("sqlite_get_published_recommendation_failed id=%s", recommendation_id)
+            return None
+        return json.loads(row["rec_json"]) if row else None
+
+    def list_published_recommendations(
+        self,
+        symbol: str | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """列出已发布推荐。status 可为单个值或列表；None = 全部。"""
+        try:
+            sql = "SELECT * FROM published_recommendations"
+            conds: list[str] = []
+            params: list[Any] = []
+            if symbol is not None:
+                conds.append("symbol=?")
+                params.append(symbol)
+            if status is not None:
+                if isinstance(status, (list, tuple, set)):
+                    placeholders = ",".join("?" for _ in status)
+                    conds.append(f"status IN ({placeholders})")
+                    params.extend(status)
+                else:
+                    conds.append("status=?")
+                    params.append(status)
+            if conds:
+                sql += " WHERE " + " AND ".join(conds)
+            sql += " ORDER BY updated_at DESC LIMIT ?"
+            params.append(limit)
+            with self._lock:
+                rows = self._conn.execute(sql, params).fetchall()
+        except Exception:
+            logger.exception("sqlite_list_published_recommendations_failed")
+            return []
+        return [json.loads(r["rec_json"]) for r in rows]
 
     def save_simulation_queue_item(self, item: dict[str, Any]) -> None:
         try:

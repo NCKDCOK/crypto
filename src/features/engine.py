@@ -67,6 +67,8 @@ class FeatureEngineState:
     # Funding 基线
     funding_baseline: list[FundingRateSnapshot] = field(default_factory=list)
     latest_funding: FundingRateSnapshot | None = None
+    # V1.4 §二十三：多空比快照（普通户 / 大户账户 / 大户持仓）
+    latest_ls_ratio: Any = None  # LongShortRatioSnapshot
     # Kline 上下文：interval → 最近 closed bar
     klines: dict[str, KlineEvent] = field(default_factory=dict)
     # Kline 历史序列：interval → closed bar 列表（V1.2 Structure/VP 用，恢复时加载）
@@ -116,6 +118,11 @@ class FeatureEngine:
         """标记该 symbol 是否有现货市场（runtime 由 SpotSymbolRegistry 注入）。"""
         state = self.get_state(symbol)
         state.spot_available = available
+
+    def add_long_short_ratio(self, snap) -> None:
+        """V1.4 §二十三：注入多空比快照（三个指标严格区分）。"""
+        state = self.get_state(snap.symbol)
+        state.latest_ls_ratio = snap
 
     def add_spot_trade(self, symbol: str, trade: TradeEvent) -> None:
         """注入一笔现货成交 → spot WindowManager + spot CVD。"""
@@ -256,6 +263,10 @@ class FeatureEngine:
         delta_ratio = None
         if buy_v is not None and sell_v is not None and (buy_v + sell_v) > 0:
             delta_ratio = (buy_v - sell_v) / (buy_v + sell_v)
+        # V1.4 §二十五：taker_buy_sell_ratio = buy / sell（与 delta_ratio 严格区分）
+        taker_bs_ratio: float | None = None
+        if buy_v is not None and sell_v is not None and sell_v > 0:
+            taker_bs_ratio = buy_v / sell_v
         cvd = state.cvd.get_cvd(symbol)
         cvd_slope = state.cvd.get_cvd_slope(symbol)
         cvd_slope_z = state.cvd.get_cvd_slope_z(symbol)
@@ -264,6 +275,7 @@ class FeatureEngine:
         features["taker_buy_volume"] = _fv(buy_v, "30s")
         features["taker_sell_volume"] = _fv(sell_v, "30s")
         features["delta_ratio"] = _fv(delta_ratio, "30s")
+        features["taker_buy_sell_ratio"] = _fv(taker_bs_ratio, "30s")   # V1.4 §二十五
         features["cvd"] = _fv(cvd, None)
         features["CVD_slope"] = _fv(cvd_slope, "30s")
         features["cvd_slope_z"] = _fv(cvd_slope_z, "30s")
@@ -354,6 +366,7 @@ class FeatureEngine:
         features["oi_change_pct_1h"] = _fv(oi_feats.oi_change_pct_1h, "1h")
         features["oi_velocity"] = _fv(oi_feats.oi_velocity, None)
         features["oi_acceleration"] = _fv(oi_feats.oi_accel, None)
+        features["oi_zscore"] = _fv(oi_feats.oi_zscore, None)   # V1.4 §十七
         provenance["oi"] = {
             "snapshot_count": len(state.oi_snapshots),
             "source_streams": ["oi_poller"],
@@ -365,8 +378,18 @@ class FeatureEngine:
             features["funding"] = _fv(float(state.latest_funding.last_funding_rate), None)
             features["premium"] = _fv(float(state.latest_funding.premium), None)
             features["funding_percentile"] = _fv(ctx.funding_percentile, None)
+            features["funding_zscore"] = _fv(ctx.funding_zscore, None)   # V1.4 §十六
+            features["funding_percentile_7d"] = _fv(ctx.funding_percentile_7d, None)
+            features["funding_percentile_30d"] = _fv(ctx.funding_percentile_30d, None)
             features["premium_percentile"] = _fv(ctx.premium_percentile, None)
             provenance["context"] = {"source_streams": ["funding_premium"]}
+        # V1.4 §二十三：多空比（严格区分三个指标）
+        ls = state.latest_ls_ratio
+        if ls is not None:
+            features["global_account_ls_ratio"] = _fv(ls.global_account_ls_ratio, None)
+            features["top_trader_account_ls_ratio"] = _fv(ls.top_trader_account_ls_ratio, None)
+            features["top_trader_position_ls_ratio"] = _fv(ls.top_trader_position_ls_ratio, None)
+            provenance["long_short_ratio"] = {"source_streams": ["long_short_ratio"]}
         # kline 上下文：各周期最近 closed bar 的 return
         for interval in self.kline_intervals:
             kl = state.klines.get(interval)

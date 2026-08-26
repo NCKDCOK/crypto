@@ -127,6 +127,23 @@ class Repository(ABC):
     ) -> list[dict[str, Any]]:
         return []
 
+    # ── V1.4 正式推荐生命周期（默认 no-op，SqliteRepository 覆写）──
+
+    def save_published_recommendation(self, rec: dict[str, Any]) -> None:
+        """保存/更新一条已发布推荐。默认 no-op。"""
+        pass
+
+    def get_published_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:
+        return None
+
+    def list_published_recommendations(
+        self,
+        symbol: str | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        return []
+
     def get_last_write_ms(self) -> int | None:
         return None
 
@@ -151,6 +168,8 @@ class InMemoryRepository(Repository):
         self._simulation_events: list[dict[str, Any]] = []
         self._simulation_positions: dict[str, dict[str, Any]] = {}
         self._simulation_results: dict[str, dict[str, Any]] = {}
+        # V1.4 正式推荐生命周期
+        self._published_recommendations: dict[str, dict[str, Any]] = {}
 
     async def save_event(self, event: Any) -> None:
         self._events.append(event)
@@ -245,3 +264,29 @@ class InMemoryRepository(Repository):
                   if symbol is None or e.get("symbol") == symbol]
         events.sort(key=lambda e: e.get("asof", 0), reverse=True)
         return events[:limit]
+
+    # ── V1.4 正式推荐生命周期（内存版，测试/replay 用）──
+
+    def save_published_recommendation(self, rec: dict[str, Any]) -> None:
+        self._published_recommendations[rec["recommendation_id"]] = dict(rec)
+
+    def get_published_recommendation(self, recommendation_id: str) -> dict[str, Any] | None:
+        rec = self._published_recommendations.get(recommendation_id)
+        return dict(rec) if rec else None
+
+    def list_published_recommendations(
+        self,
+        symbol: str | None = None,
+        status: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        recs = list(self._published_recommendations.values())
+        if symbol is not None:
+            recs = [r for r in recs if r.get("symbol") == symbol]
+        if status is not None:
+            if isinstance(status, (list, tuple, set)):
+                recs = [r for r in recs if r.get("status") in status]
+            else:
+                recs = [r for r in recs if r.get("status") == status]
+        recs.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
+        return recs[:limit]

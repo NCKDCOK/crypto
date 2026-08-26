@@ -194,6 +194,34 @@ class FundingRateSnapshot(_EventBase):
 
 
 # ────────────────────────────────────────────────────────────────────
+# §4b  LongShortRatioSnapshot  (V1.4 §二十三)
+# ────────────────────────────────────────────────────────────────────
+
+
+class LongShortRatioSnapshot(_EventBase):
+    """多空比快照。来源：Binance ``/futures/data/*LongShort*Ratio`` 系列。
+
+    V1.4 §二十三：必须严格区分三个指标，禁止混为同一个 long_short_ratio。
+
+    REST 响应字段映射（每端点返回 longShortRatio / longAccount / shortAccount）：
+        globalLongShortAccountRatio → global_account_ls_ratio
+        topLongShortAccountRatio    → top_trader_account_ls_ratio
+        topLongShortPositionRatio   → top_trader_position_ls_ratio
+
+    ratio = longAccount / shortAccount（>1 偏多，<1 偏空）。
+    """
+
+    symbol: str = Field(..., min_length=1)
+    exchange: str = Field(default="binance")
+    event_time: int = Field(..., ge=0)
+    receive_time: int = Field(..., ge=0)
+    global_account_ls_ratio: float | None = Field(default=None, description="普通账户多空比")
+    top_trader_account_ls_ratio: float | None = Field(default=None, description="大户账户多空比")
+    top_trader_position_ls_ratio: float | None = Field(default=None, description="大户持仓多空比")
+    source: str = Field(default="binance_rest_longshort_ratio")
+
+
+# ────────────────────────────────────────────────────────────────────
 # §5  HealthStatus
 # ────────────────────────────────────────────────────────────────────
 
