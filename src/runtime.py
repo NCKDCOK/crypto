@@ -893,12 +893,8 @@ class MarketRadarRuntime:
         self.decision_snapshot_service = DecisionSnapshotService(
             interval_s=cfg.ranking.decision_snapshot_s,
         )
-        self.recommendation_snapshot_service = RecommendationSnapshotService(
-            min_opportunity=cfg.ranking.min_opportunity,
-            min_signal_confirmation=cfg.ranking.min_signal_confirmation,
-            min_data_confidence=cfg.ranking.min_data_confidence,
-            max_pump_risk=cfg.ranking.max_pump_risk,
-        )
+        # V1.4 §2：推荐快照服务不再独立判定门槛（统一由 RecommendationGate 判定）
+        self.recommendation_snapshot_service = RecommendationSnapshotService()
         self.revalidation_engine = EntryRevalidationEngine(
             stale_max_s=cfg.simulation.revalidation_stale_max_s,
             min_data_confidence=cfg.ranking.min_data_confidence,
@@ -1447,10 +1443,11 @@ class MarketRadarRuntime:
             labels=labels, now_ms=now,
         ).to_dict()
 
-        # V1.3 P2：首页稳定决策快照（§11）+ 推荐快照/模拟验证驱动（§22/§29；§47 仅 LIVE）
+        # V1.3 P2：首页稳定决策快照（观察池用）+ 模拟验证逐 tick 驱动（§29；§47 仅 LIVE）
+        # V1.4 §2：推荐快照在发布时已冻结（_publish_recommendation → _create_recommendation_snapshot），
+        #          此处不再每周期独立判定门槛。
         self._build_home_decision(symbol, now)
         if self.system_mode == SystemMode.LIVE:
-            self._maybe_create_snapshot(symbol, now, current_price)
             self._drive_simulation(symbol, now)
 
     # ── V1.3 P2 模拟验证：决策快照 / 推荐快照 / 逐 tick 驱动 ──
@@ -1497,6 +1494,10 @@ class MarketRadarRuntime:
         if self._last_gate_bar.get(symbol) == bar_open:
             return  # 同一 5m 收盘窗口只评估一次（§四 决策边界）
         self._last_gate_bar[symbol] = bar_open
+
+        # §六 SLOW PATH：新 5m 收盘 → 对已有活跃正式推荐跑状态转移（减弱/降级/恢复/风险）
+        # （无论 Gate 是否通过/是否发布新推荐，已有推荐的生命周期按 5m Decision Window 推进）
+        self._supervise_published_slow(symbol, now_ms, current_price, sig_bd)
 
         plan = st.trade_plan or {}
         sig_dict = sig_bd.to_dict() if sig_bd is not None else {}
@@ -1554,7 +1555,10 @@ class MarketRadarRuntime:
             published_at=now_ms,
             side=direction,
             setup_type=st.setup_type,
-            primary_timeframe="15m",
+            # V1.4 §四：主触发=5m 收盘 / §3.2 强确认=15m / 上下文同向=1h
+            trigger_timeframe="5m",
+            confirmation_timeframe="15m",
+            context_timeframe="1h",
             published_state=st.state.value,
             current_state=st.state.value,
             published_price=current_price or None,
@@ -1578,6 +1582,8 @@ class MarketRadarRuntime:
         self.published_repo.save(rec)
         st.recommendation_id = rec.recommendation_id
         self.lifecycle_engine.register(rec, now_ms)   # §六：注册到 Supervisor 生命周期
+        # §2：发布即冻结不可变快照 → WATCHING 入队（绑定 recommendation_id）
+        self._create_recommendation_snapshot(symbol, rec, now_ms, current_price)
         logger.info(
             "[recommendation] %s 发布正式推荐 %s (%s, %s) opp=%s sig=%s conf=%s",
             symbol, rec.recommendation_id, st.setup_type, rec.confirmation_level, opp, sig, dc,
@@ -1597,24 +1603,16 @@ class MarketRadarRuntime:
                 return True
         return False
 
-    def _supervise_published(
+    def _build_lifecycle_ctx(
         self, symbol: str, now_ms: int, current_price: float, sig_bd,
-    ) -> None:
-        """§六：驱动该 symbol 当前活跃正式推荐的生命周期评估（状态转移 / 退出）。
-
-        - 每个计算 tick 推进一次：更新 current_*，按 §八/§三十三/§四.4 决定状态。
-        - 立即退出（Hard Veto / Withdrawal / Invalidation / Data Critical）无需等待 5m 收盘。
-        - 生命周期间隔由调用方节奏（compute loop）驱动；非 LIVE 无活跃推荐，等价 no-op。
-        """
+    ) -> tuple[PublishedRecommendation | None, SymbolRuntimeState, LifecycleContext] | None:
+        """构建生命周期评估上下文（fast/slow 共用）。无活跃推荐返回 None。"""
         rec = self.published_repo.active_by_symbol(symbol)
-        if rec is None:
-            return  # 该 symbol 当前无活跃正式推荐
-        if rec.is_terminal():
-            return  # 终态：不再转移
+        if rec is None or rec.is_terminal():
+            return None
         st = self.get_state(symbol)
         sig_dict = sig_bd.to_dict() if sig_bd is not None else {}
         plan = st.trade_plan or {}
-        # 价格触及失效位 → 即时 Invalidation（§四.4）
         invalidated = False
         inv = rec.invalidation_price or plan.get("invalidation_price")
         if inv is not None and current_price:
@@ -1622,13 +1620,11 @@ class MarketRadarRuntime:
                 invalidated = True
             elif rec.side == "SHORT" and current_price >= inv:
                 invalidated = True
-        # 风险池标签（§七.6）：EXHAUSTION / DISTRIBUTION
         risk_status: str | None = None
         if st.state == State.EXHAUSTION:
             risk_status = "EXHAUSTION"
         elif st.setup_type == "DISTRIBUTION" or (st.distribution_risk or 0) >= 60:
             risk_status = "DISTRIBUTION"
-        # 数据严重异常：data_confidence 远破门禁门槛 或 核心流断线
         dc = st.data_confidence if st.data_confidence_available else None
         data_critical = (
             (dc is not None and dc < self.cfg.recommendation.min_data_confidence - 25)
@@ -1648,47 +1644,66 @@ class MarketRadarRuntime:
             risk_status=risk_status,
             in_formal_range=st.state.value in FORMAL_STATES,
         )
-        decision = self.lifecycle_engine.tick(rec, ctx)
-        self.published_repo.save(rec)   # 持久化 current_* / status 变更
-        if decision.exited:
-            st.recommendation_id = None  # 退出首页活跃区
-            logger.info(
-                "[recommendation] %s 退出 %s %s（%s）",
-                symbol, rec.recommendation_id, rec.status.value, rec.exit_reason,
-            )
-        elif decision.transitioned:
-            logger.info(
-                "[recommendation] %s 状态转移 → %s（%s）",
-                symbol, decision.new_status.value if decision.new_status else rec.status.value,
-                decision.reason,
-            )
+        return rec, st, ctx
 
-    def _maybe_create_snapshot(self, symbol: str, now: int, current_price: float) -> None:
-        """§22：过 Top 门槛的正式推荐 → 冻结不可变快照 → WATCHING 入队。
+    def _supervise_published(
+        self, symbol: str, now_ms: int, current_price: float, sig_bd,
+    ) -> None:
+        """§六 FAST PATH（实时每 tick）：即时退出 + current_* 更新。
 
-        §47 门控在调用方（仅 LIVE）。去重（§19/§22）：同一 trade_plan_id 只冻结
-        一份；版本冻结产生新 trade_plan_id 后再建新快照。
+        普通状态转移（减弱/降级/风险/恢复）在 5m 收盘边界由 _supervise_published_slow 处理。
+        即时退出（Hard Veto / Withdrawal / Invalidation / Data Critical）无需等待 5m。
         """
+        built = self._build_lifecycle_ctx(symbol, now_ms, current_price, sig_bd)
+        if built is None:
+            return
+        rec, st, ctx = built
+        decision = self.lifecycle_engine.tick_fast(rec, ctx)
+        self.published_repo.save(rec)
+        if decision.exited:
+            st.recommendation_id = None
+            logger.info("[recommendation] %s 退出 %s %s（%s）",
+                        symbol, rec.recommendation_id, rec.status.value, rec.exit_reason)
+        elif decision.transitioned:
+            logger.info("[recommendation] %s 状态转移 → %s（%s）",
+                        symbol, decision.new_status.value if decision.new_status else rec.status.value,
+                        decision.reason)
+
+    def _supervise_published_slow(
+        self, symbol: str, now_ms: int, current_price: float, sig_bd,
+    ) -> None:
+        """§六 SLOW PATH（仅 5m 收盘决策窗口）：正常→减弱 / 减弱→恢复 / 减弱→退出 /
+        风险池 / Setup 是否仍成立。fail_streak 按 5m Decision Window 计数（§三十三/§八）。
+        """
+        built = self._build_lifecycle_ctx(symbol, now_ms, current_price, sig_bd)
+        if built is None:
+            return
+        rec, st, ctx = built
+        decision = self.lifecycle_engine.tick_slow(rec, ctx)
+        self.published_repo.save(rec)
+        if decision.exited:
+            st.recommendation_id = None
+            logger.info("[recommendation] %s 退出 %s %s（%s）",
+                        symbol, rec.recommendation_id, rec.status.value, rec.exit_reason)
+        elif decision.transitioned:
+            logger.info("[recommendation] %s 状态转移 → %s（%s）",
+                        symbol, decision.new_status.value if decision.new_status else rec.status.value,
+                        decision.reason)
+
+    def _create_recommendation_snapshot(
+        self, symbol: str, rec: PublishedRecommendation, now: int, current_price: float,
+    ) -> None:
+        """§22：发布正式推荐即冻结不可变快照 → WATCHING 入队（绑定 recommendation_id）。
+
+        V1.4 §2：删旧 passes_gate 门槛——正式推荐门槛统一由 RecommendationGate（§三）
+        判定，通过 → 发布 PublishedRecommendation → 此处冻结快照。禁止第二套门槛。
+        去重：同一 recommendation_id 只冻结一份。
+        """
+        done = self._snapshot_plan_ids.setdefault(symbol, set())
+        if rec.recommendation_id in done:
+            return
         st = self.get_state(symbol)
         plan = st.trade_plan or {}
-        plan_id = plan.get("trade_plan_id")
-        if not plan_id or plan.get("status") != STATUS_ACTIVE:
-            return
-        done = self._snapshot_plan_ids.setdefault(symbol, set())
-        if plan_id in done:
-            return
-        passed = self.recommendation_snapshot_service.passes_gate(
-            state=st.state,
-            opportunity_score=st.opportunity_score if st.score_available else None,
-            signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
-            data_confidence=st.data_confidence if st.data_confidence_available else None,
-            trade_plan=plan,
-            pump_risk=st.pump_risk,
-            stale_flag=st.stale_flag,
-        )
-        if not passed:
-            return
-        # §20 证据 / Veto：最近含证据的 transition（冻结推荐时刻的上下文）
         le = self.last_evidence_transition.get(symbol)
         evidence = [
             {"family": e.family.value, "type": e.type, "window": e.window,
@@ -1708,9 +1723,9 @@ class MarketRadarRuntime:
             setup_type=st.setup_type,
             direction=st.direction.value if st.direction else None,
             current_price=current_price or None,
-            opportunity_score=st.opportunity_score if st.score_available else None,
-            signal_confirmation=st.signal_confirmation if st.signal_confirmation_available else None,
-            data_confidence=st.data_confidence if st.data_confidence_available else None,
+            opportunity_score=rec.published_opportunity_score,
+            signal_confirmation=rec.published_signal_confirmation,
+            data_confidence=rec.published_data_confidence,
             all_subscores={
                 **st.score_breakdown,
                 **st.data_confidence_breakdown,
@@ -1722,11 +1737,16 @@ class MarketRadarRuntime:
             structure_state=st.structure_state,
             spot_perp_state=st.spot_perp_state,
             trade_plan=plan,
+            recommendation_id=rec.recommendation_id,   # §2 绑定正式推荐
         )
-        done.add(plan_id)
+        done.add(rec.recommendation_id)
         self.repository.save_recommendation_snapshot(symbol, now, snap.to_dict())
-        self.simulation_queue.create_from_snapshot(snap.to_dict(), now)
-        logger.info("[simulation] %s 冻结推荐快照 %s", symbol, snap.snapshot_id)
+        item = self.simulation_queue.create_from_snapshot(snap.to_dict(), now)
+        rec.snapshot_id = snap.snapshot_id
+        rec.simulation_id = item.simulation_id
+        self.published_repo.save(rec)
+        logger.info("[simulation] %s 冻结推荐快照 %s (rec=%s)",
+                    symbol, snap.snapshot_id, rec.recommendation_id)
 
     def _drive_simulation(self, symbol: str, now: int) -> None:
         """V1.3 P2：模拟队列 + 持仓逐 tick 驱动（§47 仅 LIVE 正式）。
@@ -2172,6 +2192,9 @@ class MarketRadarRuntime:
                 "symbol": rec.symbol,
                 "side": rec.side,
                 "setup_type": rec.setup_type,
+                "trigger_timeframe": rec.trigger_timeframe,
+                "confirmation_timeframe": rec.confirmation_timeframe,
+                "context_timeframe": rec.context_timeframe,
                 "confirmation_level": rec.confirmation_level,
                 "status": rec.status.value,
                 "risk_status": rec.risk_status,

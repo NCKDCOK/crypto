@@ -44,41 +44,25 @@ class TestAutoEnqueue:
         assert abs(item.distance_pct) < 1e-9
 
 
-class TestNonFormalNotEnqueued:
-    """§66.4：非正式状态不加入 — 由 §13 gate 拦截；此处验证 gate 与入队一致。"""
+class TestSnapshotEnqueue:
+    """V1.4 §2：正式推荐 → 不可变快照 → WATCHING 入队（绑定 recommendation_id）。
 
-    def test_cooldown_never_pass_gate(self, snapshot_dict):
-        from src.simulation import RecommendationSnapshotService
-        svc = RecommendationSnapshotService()
-        assert svc.passes_gate(
-            state="COOLDOWN", opportunity_score=85.0, signal_confirmation=88.0,
-            data_confidence=92.0, trade_plan={"status": "ACTIVE"},
-            pump_risk=10.0, stale_flag=None,
-        ) is False
+    门槛由 RecommendationGate（§三）判定（见 test_recommendation_gate.py），不再由
+    快照服务判定。runtime 保证只有已发布正式推荐才创建快照（无 rec_id 禁止进模拟）。
+    """
 
-    def test_suspected_start_never_pass_gate(self, snapshot_dict):
-        from src.simulation import RecommendationSnapshotService
-        svc = RecommendationSnapshotService()
-        assert svc.passes_gate(
-            state="SUSPECTED_START", opportunity_score=85.0, signal_confirmation=88.0,
-            data_confidence=92.0, trade_plan={"status": "ACTIVE"},
-            pump_risk=10.0, stale_flag=None,
-        ) is False
+    def test_create_from_snapshot_binds_recommendation_id(self, snapshot_dict):
+        snap = {**snapshot_dict, "recommendation_id": "REC-ABC123"}
+        q, _, _, _ = _queue_and_deps(snap)
+        item = q.create_from_snapshot(snap, now_ms=1000)
+        assert item.recommendation_id == "REC-ABC123"
+        assert item.status == SimulationStatus.WATCHING
 
-    def test_gate_pass_then_enqueue_full_path(self, snapshot_dict):
-        """gate 通过 → 快照 → 入队（§22 完整路径）。"""
-        from src.simulation import RecommendationSnapshotService
-        svc = RecommendationSnapshotService()
-        ok = svc.passes_gate(
-            state=snapshot_dict["state"], opportunity_score=snapshot_dict["opportunity_score"],
-            signal_confirmation=snapshot_dict["signal_confirmation"],
-            data_confidence=snapshot_dict["data_confidence"],
-            trade_plan=snapshot_dict["trade_plan"], pump_risk=10.0, stale_flag=None,
-        )
-        assert ok is True
+    def test_simulation_id_equals_snapshot_id(self, snapshot_dict):
         q, _, _, _ = _queue_and_deps(snapshot_dict)
         item = q.create_from_snapshot(snapshot_dict, now_ms=1000)
-        assert item.status == SimulationStatus.WATCHING
+        assert item.simulation_id == snapshot_dict["snapshot_id"]
+        assert item.snapshot_id == snapshot_dict["snapshot_id"]
 
 
 class TestWatchingTransitions:

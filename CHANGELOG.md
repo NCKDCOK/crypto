@@ -1,5 +1,49 @@
 # CHANGELOG
 
+## [V1.4.1] — 消除「多套真相」修复（首页正式推荐 + 单一门槛链 + 双时钟生命周期）
+
+修复 V1.4 遗留的 7 处问题：首页仍读实时 Top10、双推荐门槛、普通降级过实时、主周期写错、
+排名滞回管成员、三层 Supervisor 职责重叠、DecisionSnapshot 承担正式推荐。目标：**只有一条主线**。
+
+### P0 — 消除多套真相
+- **首页改读 PublishedRecommendation（§十）**：前端 `renderHome` 主区 = `published_recommendations`
+  （0~N 真实存在，独立对象直到 EXITED/INVALIDATED/EXPIRED 才消失），`confirmed_opportunities`
+  降为次级「即将确认」区（允许快速变化）；`homeMateriallyChanged` 基于 published 成员（rec_id+status）；
+  新增 `renderPublishedCard` 双值（发布时 vs 当前，§三十三 86 不被覆盖成 73）+ 三段 timeframe + 监督时长。
+  **不再强行 Top10，0 条即显示 0 条**。删除废弃 `renderHomeCard`/`snapValue`/`liveValue`/`supervisionStage`。
+- **删旧 Snapshot Gate + 单一门槛链（§2）**：删 `RecommendationSnapshotService.passes_gate`（第二套门槛）；
+  改为发布即冻结快照：`_publish_recommendation → _create_recommendation_snapshot`（绑定 recommendation_id）
+  → SimulationQueue。`SimulationQueueItem`/`RecommendationSnapshot` 加 `recommendation_id` 字段；
+  **无 recommendation_id 的机会禁止进入模拟系统**。删 `_maybe_create_snapshot` 周期独立判定。
+- **双时钟生命周期（§3）**：`RecommendationLifecycleEngine.tick` 拆 `tick_fast`（实时每 tick：
+  current_* 更新 + 即时退出 Hard Veto/Withdrawal/Invalidation/Data Critical）/ `tick_slow`（仅 5m 收盘边界：
+  正常→减弱/减弱→恢复/减弱→退出/风险池）。**fail_streak 按 5m Decision Window 计数**（连续 N 个 5m 收盘
+  失败才退出，非 2 秒 tick），避免驻留期满后 4 秒就退出。runtime `_gate_and_publish` 5m 边界调 slow。
+- **主周期拆三段（§4）**：`PublishedRecommendation` 加 `trigger_timeframe=5m` / `confirmation_timeframe=15m`
+  / `context_timeframe=1h`（原 `primary_timeframe="15m"` 硬编码错误）。首页显示「5m 主触发 · 15m 确认 · 1h 同向」。
+- **首页正式机会不经 RankingHysteresis（§5）**：published 是独立对象，直接 `published_repo.active()`，
+  不经排序/滞回；confirmed 次级区才经实时排名。
+
+### P1 — 统一三层监督职责（§6）
+- **StatePool Supervisor**（`SupervisorEngine.update`）：管「这个币属于哪个监控池」。
+- **Recommendation Lifecycle**（`RecommendationLifecycleEngine.tick_fast/slow`）：管「已发布推荐能否继续存在」
+  （唯一决定推荐退出）。
+- **Simulation Supervisor**（`SimulationQueueManager`/`PaperPositionManager`）：管「模拟观察/仓位下一步」。
+- `SupervisorEngine.evaluate` 不控制推荐退出（加职责边界注释），避免两套退出互相打架。
+
+### 测试与文档
+- 更新测试：`test_snapshot.py` 删 `TestGate`（passes_gate 语义迁至 `test_recommendation_gate.py`）+ 加
+  recommendation_id 绑定断言；`test_queue.py` `TestNonFormalNotEnqueued`→`TestSnapshotEnqueue`；`test_lifecycle.py`
+  `tick`→`tick_slow`（状态转移）；`test_boundary_publish.py` 状态转移测试改 `tick_slow`。
+- 全套 **809 passed**（删旧 gate 测试 -13，净增双时钟/绑定用例）。
+- 首页实测：正式机会 0 条（非 LIVE 正确空态）、即将确认/正在观察次级区、风险提醒在线。
+
+**最终主线**：实时数据 → Candidate Radar → 等 5m 收盘 → RecommendationGate → PublishedRecommendation
+→ 首页正式推荐 → Lifecycle（Monitoring/Weakening/Risk）→ Exit/归档；并行 PublishedRec → Snapshot
+→ SimQueue → Revalidation → 入场 → 持仓 → 统计。
+
+---
+
 ## [V1.4] — 正式推荐生命周期修复 + 状态监督闭环 + Short Squeeze 专项 Setup
 
 依据《crypto_radar_v1.4_fix_update_plan.md》。本轮目标：彻底解决首页推荐频繁更换/状态抖动，

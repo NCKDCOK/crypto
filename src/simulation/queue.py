@@ -46,6 +46,8 @@ class SimulationQueueItem:
     symbol: str
     snapshot: dict[str, Any]                 # 冻结快照 to_dict 副本（§20）
     created_at: int
+    # V1.4 §2：绑定发布它的正式推荐 id（无 recommendation_id 禁止进模拟）
+    recommendation_id: str | None = None
     status: SimulationStatus = SimulationStatus.WATCHING
     updated_at: int = 0
     # §24 WATCHING 记录
@@ -77,6 +79,7 @@ class SimulationQueueItem:
             "snapshot_id": self.snapshot_id,
             "symbol": self.symbol,
             "snapshot": self.snapshot,
+            "recommendation_id": self.recommendation_id,
             "created_at": self.created_at,
             "status": self.status.value,
             "updated_at": self.updated_at,
@@ -143,6 +146,7 @@ class SimulationQueueManager:
             snapshot_id=snapshot["snapshot_id"],
             symbol=snapshot["symbol"],
             snapshot=dict(snapshot),
+            recommendation_id=snapshot.get("recommendation_id"),
             created_at=now_ms,
             updated_at=now_ms,
             recommendation_price=price,
@@ -164,6 +168,7 @@ class SimulationQueueManager:
             snapshot_id=item_dict["snapshot_id"],
             symbol=item_dict["symbol"],
             snapshot=item_dict.get("snapshot") or {},
+            recommendation_id=item_dict.get("recommendation_id"),
             created_at=item_dict.get("created_at", 0),
             status=SimulationStatus(item_dict["status"]),
             updated_at=item_dict.get("updated_at", 0),

@@ -312,7 +312,7 @@ class TestSupervisePublishedWiring:
         _seed_good(rt, "BTCUSDT")
         _gate_call(rt, "BTCUSDT")
         now = rt.clock.now_ms()
-        rt._supervise_published("BTCUSDT", now, 106.0, _good_sig_bd())
+        rt._supervise_published_slow("BTCUSDT", now, 106.0, _good_sig_bd())
         rec = rt.published_repo.active()[0]
         assert rec.status == RecommendationStatus.MONITORING
         assert rec.current_price == 106.0          # current_* 持续更新
@@ -368,7 +368,7 @@ class TestSupervisePublishedWiring:
         st = rt.get_state("BTCUSDT")
         st.opportunity_score = 65.0        # < 70 门禁门槛
         now = rt.clock.now_ms()
-        rt._supervise_published("BTCUSDT", now, 105.0, _good_sig_bd())
+        rt._supervise_published_slow("BTCUSDT", now, 105.0, _good_sig_bd())
         rec = rt.published_repo.active()[0]
         assert rec.status == RecommendationStatus.WEAKENING
         assert rec.is_active() is True

@@ -64,20 +64,6 @@ const KANBAN_COLUMNS = [
 ];
 // §35 运行中非持久化字段 → —（不显示实时资金摘要）
 const RUNNING_NA_FIELDS = ['资金变化', '撤离风险'];
-// §53 监督阶段（首页卡片/监督台阶段徽标）
-function supervisionStage(row) {
-  const pool = (row.supervision && row.supervision.current_pool) || row.current_pool;
-  const sim = row.simulation_status;
-  if (sim === 'SIMULATED_ENTRY' || sim === 'OPEN') return '模拟跟踪中';
-  if (sim === 'REVALIDATING') return '等待二次确认';
-  if (sim === 'ARMED') return '确认启动';
-  if (sim === 'WATCHING' || sim === 'ENTRY_ZONE_REACHED') return '等待回踩';
-  if (pool === 'continuation') return '趋势跟踪';
-  if (pool === 'risk') return '资金衰减';
-  if (pool === 'exit') return '撤离观察';
-  if (pool === 'confirmed') return '确认启动';
-  return '—';
-}
 // §54 方向箭头（30s 稳定窗口；首轮 / 无变化 → →）
 function trendArrow(cur, prev) {
   if (prev == null || cur == null) return '→';
@@ -215,6 +201,7 @@ function renderHome(view) {
     return;
   }
 
+  const published = home && home.published_recommendations ? home.published_recommendations : [];
   const confirmed = home && home.confirmed_opportunities ? home.confirmed_opportunities : [];
   const watch = home && home.watch_candidates ? home.watch_candidates : [];
   const risk = home && home.risk_candidates ? home.risk_candidates : [];
@@ -224,7 +211,7 @@ function renderHome(view) {
 
   let html = '';
 
-  // §15 首页顶部字段：市场背景 / 数据健康 / Universe / 重点观察数 / 确认机会数 / 风险中数量
+  // §15 首页顶部字段
   html += `<div class="top-stats">
     <div class="top-stat"><span class="label">市场背景</span>
       <span class="value">${regime ? escapeHtml(regime.label || '—') : '—'}</span>
@@ -235,24 +222,48 @@ function renderHome(view) {
       ${health && health.coverage_pct != null ? `<span class="sub">${fmt(health.coverage_pct, 0)}% 覆盖</span>` : ''}
     </div>
     <div class="top-stat"><span class="label">Universe</span><span class="value accent">${universe || '—'}</span></div>
-    <div class="top-stat"><span class="label">重点观察</span><span class="value warning">${watch.length}</span></div>
-    <div class="top-stat"><span class="label">确认机会</span><span class="value long">${confirmed.length}</span></div>
+    <div class="top-stat"><span class="label">正式机会</span><span class="value long">${published.length}</span></div>
+    <div class="top-stat"><span class="label">即将确认</span><span class="value warning">${confirmed.length}</span></div>
     <div class="top-stat"><span class="label">风险中</span><span class="value short">${risk.length}</span></div>
   </div>`;
 
-  // §13 Top Opportunities：最多 10 个，不强制凑满；0 个显示空态文案
-  html += `<div class="section-title">Top Opportunities <span class="count">${confirmed.length}/10</span></div>`;
+  // V1.4 §十：正式机会 = PublishedRecommendation（0~N 真实存在，不经实时排名 / 不经 RankingHysteresis）
+  html += `<div class="section-title">正式机会 <span class="count">${published.length}</span></div>`;
 
-  if (confirmed.length === 0) {
+  if (published.length === 0) {
     html += `<div class="empty-state compact">
       <div class="icon">📡</div>
-      <div class="title">当前暂无确认机会。</div>
-      <div class="desc">系统正在重点观察 ${watch.length} 个候选。</div>
+      <div class="title">当前暂无正式确认机会。</div>
+      <div class="desc">系统正在重点观察 ${watch.length} 个候选，等待 5m 收盘确认。</div>
     </div>`;
   } else {
     html += '<div class="card-grid">';
-    for (let i = 0; i < confirmed.length; i++) {
-      html += renderHomeCard(confirmed[i], i + 1);
+    for (let i = 0; i < published.length; i++) {
+      html += renderPublishedCard(published[i], i + 1);
+    }
+    html += '</div>';
+  }
+
+  // §十.3 次级：即将确认（实时观察，允许快速变化——还不是推荐）
+  if (confirmed.length > 0) {
+    html += `<div class="section-title">即将确认 <span class="count">${confirmed.length}</span><span class="text-muted" style="font-size:0.7rem;margin-left:8px">实时观察</span></div>`;
+    html += '<div class="watch-grid">';
+    for (const c of confirmed.slice(0, 6)) {
+      const dir = c.direction_label ? `<span class="badge badge-${(c.direction || '').toLowerCase()}">${escapeHtml(c.direction_label)}</span>` : '';
+      html += `<div class="watch-card" onclick="selectSymbol('${c.symbol}')">
+        <div class="watch-head">
+          <span class="card-symbol">${c.symbol}</span>
+          <span>
+            <span class="badge badge-state-${c.state}">${escapeHtml(c.state_label || c.state)}</span>
+            ${dir}
+          </span>
+        </div>
+        <div class="watch-body">
+          <div class="watch-row"><span class="label">机会</span><span class="value text-accent">${c.opportunity_score != null ? fmt(c.opportunity_score, 1) : '—'}</span></div>
+          <div class="watch-row"><span class="label">确认</span><span class="value">${c.signal_confirmation != null ? fmt(c.signal_confirmation, 0) + '%' : '—'}</span></div>
+        </div>
+        <div class="card-summary">${escapeHtml(c.summary || '等待 5m 收盘确认')}</div>
+      </div>`;
     }
     html += '</div>';
   }
@@ -298,84 +309,38 @@ function renderHome(view) {
 
   view.innerHTML = html;
 
-  // §12/§66.8 快照本次渲染，供下次节流比较
+  // V1.4 §五/§七：正式机会是独立对象，成员变化只看 published（rec_id + status）
   State.lastRendered.home = {
-    confirmed: confirmed.map(s => ({
-      symbol: s.symbol, state: s.state, direction: s.direction,
-      opp: snapValue(s, 'opportunity_score'),
-      sc: snapValue(s, 'signal_confirmation'),
-      subs: s.live_subscores || {},
+    published: published.map(r => ({
+      id: r.recommendation_id, status: r.status, symbol: r.symbol,
+      cur_opp: r.current_opportunity_score,
     })),
+    confirmedCount: confirmed.length,
     watchSymbols: watch.map(w => w.symbol).join(','),
     riskSymbols: risk.map(r => r.symbol).join(','),
   };
 }
 
-// §55 首页主值 = 推荐时快照（冻结），实时变化放 Drawer（§56）
-function snapValue(row, key) {
-  const dec = (row.decision_snapshot && row.decision_snapshot.decision) || {};
-  const v = dec[key];
-  return v != null ? v : row[key];
-}
-function liveValue(row, key) {
-  return row[key];
-}
-
-// §16 首页正式机会卡片
-function renderHomeCard(s, rank) {
-  const dir = s.direction || '';
+// V1.4 §十一：正式推荐卡片（published_* 冻结 / current_* 实时双值，§二十七/§五十五）
+function renderPublishedCard(s, rank) {
+  const dir = s.side || '';
   const dirClass = dir === 'LONG' ? 'long' : (dir === 'SHORT' ? 'short' : '');
-  const plan = (s.decision_snapshot && s.decision_snapshot.decision && s.decision_snapshot.decision.trade_plan) || s.trade_plan;
   const price = State.pricesData[s.symbol] || s.current_price;
-  const trend = State.scoreTrend[s.symbol];
-
-  // 主值=快照（§55）
-  const opp = snapValue(s, 'opportunity_score');
-  const sc = snapValue(s, 'signal_confirmation');
-  const dc = snapValue(s, 'data_confidence');
-  // §54 趋势箭头（30s 稳定窗口，实时值方向）
-  const liveOpp = liveValue(s, 'opportunity_score');
-  const aOpp = trendArrow(liveOpp, trend && trend.opp);
-  const aSc = trendArrow(liveValue(s, 'signal_confirmation'), trend && trend.sc);
-
-  // §16 子评分条：资金输入/启动质量/持续启动/即时续航/吸筹迹象/追涨安全/撤离风险
-  const subs = s.live_subscores || {};
-  const prevSubs = (trend && trend.subs) || {};
-  let subTiles = [
-    ['capital_inflow', '资金输入'],
-    ['startup_quality', '启动质量'],
-    ['sustained_startup', '持续启动'],
-    ['immediate_stamina', '即时续航'],
-  ].map(([k, label]) => {
-    const v = subs[k];
-    const a = trendArrow(v, prevSubs[k]);
-    return `<div class="sub-tile"><span class="label">${label}</span><span class="val ${scoreColor(v, false)}">${v != null ? fmt(v, 0) : '—'}</span><span class="arrow ${arrowClass(a)}">${a}</span></div>`;
-  }).join('');
-  const accumA = trendArrow(s.accumulation_score, trend && trend.accum);
-  const chaseA = trendArrow(subs.chase_safety, prevSubs.chase_safety);
-  const wdA = trendArrow(subs.withdrawal_risk, prevSubs.withdrawal_risk);
-  subTiles += `
-    <div class="sub-tile"><span class="label">吸筹迹象</span><span class="val ${scoreColor(s.accumulation_score, true)}">${s.accumulation_score != null ? fmt(s.accumulation_score, 0) : '—'}</span><span class="arrow ${arrowClass(accumA)}">${accumA}</span></div>
-    <div class="sub-tile"><span class="label">追涨安全</span><span class="val ${scoreColor(subs.chase_safety, false)}">${subs.chase_safety != null ? fmt(subs.chase_safety, 0) : '—'}</span><span class="arrow ${arrowClass(chaseA)}">${chaseA}</span></div>
-    <div class="sub-tile risk"><span class="label">撤离风险</span><span class="val ${scoreColor(subs.withdrawal_risk, true)}">${subs.withdrawal_risk != null ? fmt(subs.withdrawal_risk, 0) : '—'}</span><span class="arrow ${arrowClass(wdA)}">${wdA}</span></div>`;
-
-  // §53 监督阶段 / §52 模拟小状态
-  const stage = supervisionStage(s);
-  const simBadge = s.simulation_status
-    ? `<span class="sim-mini ${s.simulation_status === 'OPEN' || s.simulation_status === 'SIMULATED_ENTRY' ? 'live' : ''}">${SIM_STATUS_LABELS[s.simulation_status] || s.simulation_status}</span>` : '';
-
-  // §16 当前计划摘要（仅正式状态有正式计划）
-  let planSummary = '—';
-  if (plan && plan.status === 'ACTIVE') {
-    if (plan.plan_reason) planSummary = plan.plan_reason;
-    else if (plan.reference_entry_low != null && plan.reference_entry_high != null) {
-      planSummary = `等待 ${fmtPrice(plan.reference_entry_low)} ~ ${fmtPrice(plan.reference_entry_high)} 回踩重新确认`;
-    }
-  } else if (s.state === 'SUSPECTED_START') {
-    planSummary = '候选预案，尚未确认';
-  }
-
-  const summary = (s.decision_snapshot && s.decision_snapshot.decision && s.decision_snapshot.decision.summary) || s.summary || '';
+  // V1.4 §四：主周期三段
+  const tfLine = (s.trigger_timeframe && s.confirmation_timeframe && s.context_timeframe)
+    ? `<span class="text-muted">${s.trigger_timeframe}主触发 · ${s.confirmation_timeframe}确认 · ${s.context_timeframe}同向</span>` : '';
+  // 双值：发布时 vs 当前（§三十三 published 86 不可被覆盖成 73）
+  const pubOpp = s.published_opportunity_score, curOpp = s.current_opportunity_score;
+  const oppDelta = (curOpp != null && pubOpp != null) ? (curOpp - pubOpp) : null;
+  const oppArrow = oppDelta != null && oppDelta < -1 ? '↓' : (oppDelta != null && oppDelta > 1 ? '↑' : '');
+  const pubSig = s.published_signal_confirmation, curSig = s.current_signal_confirmation;
+  const pubDc = s.published_data_confidence, curDc = s.current_data_confidence;
+  const trackedMin = s.tracked_s != null ? Math.floor(s.tracked_s / 60) : null;
+  const setupBadge = s.setup_type ? `<span class="badge badge-setup">${escapeHtml(s.setup_type)}</span>` : '';
+  const confBadge = s.confirmation_level === 'STRONG' ? `<span class="badge badge-setup">强确认</span>` : '';
+  const planLine = (s.entry_zone_low != null && s.entry_zone_high != null)
+    ? `参考区 ${fmtPrice(s.entry_zone_low)}~${fmtPrice(s.entry_zone_high)} · 失效 ${fmtPrice(s.invalidation_price)}` : '';
+  const statusLabel = {PUBLISHED:'已发布', MONITORING:'监督中', WEAKENING:'条件减弱', RISK:'风险中'}[s.status] || s.status;
 
   return `
     <div class="card ${dirClass}" onclick="selectSymbol('${s.symbol}')">
@@ -383,12 +348,12 @@ function renderHomeCard(s, rank) {
         <div style="display:flex;align-items:center;gap:8px">
           <span class="card-rank">#${rank}</span>
           <span class="card-symbol">${s.symbol}</span>
-          ${simBadge}
+          ${confBadge}
         </div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">
-          <span class="badge badge-state-${s.state}">${escapeHtml(s.state_label || s.state)}</span>
-          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${escapeHtml(s.direction_label || dir)}</span>` : ''}
-          ${s.setup_label ? `<span class="badge badge-setup">${escapeHtml(s.setup_label)}</span>` : ''}
+          <span class="badge badge-state-START_CONFIRMED">${escapeHtml(statusLabel)}</span>
+          ${dir ? `<span class="badge badge-${dir.toLowerCase()}">${dir}</span>` : ''}
+          ${setupBadge}
         </div>
       </div>
       <div class="card-price">
@@ -396,17 +361,19 @@ function renderHomeCard(s, rank) {
         ${fmtPct(s.price_change_24h)} <span class="${pctColor(s.price_change_24h)}" style="font-size:0.7rem">24h</span>
       </div>
       <div class="card-meta">
-        <span class="text-muted">主周期</span> <span class="font-mono">${dash(s.primary_timeframe)}</span>
-        <span class="text-muted" style="margin-left:12px">监督阶段</span> <span class="stage-badge">${escapeHtml(stage)}</span>
+        <span class="text-muted">发布时</span> <span class="font-mono text-accent">${pubOpp != null ? fmt(pubOpp, 0) : '—'}</span>
+        <span class="text-muted" style="margin-left:12px">当前</span> <span class="font-mono">${curOpp != null ? fmt(curOpp, 0) : '—'}</span>
+        <span class="${oppDelta != null && oppDelta < 0 ? 'text-short' : (oppDelta != null && oppDelta > 0 ? 'text-accent' : '')}">${oppArrow}</span>
+        ${trackedMin != null ? `<span class="text-muted" style="margin-left:12px">已监督</span> <span class="font-mono">${trackedMin}m</span>` : ''}
       </div>
       <div class="card-scores">
-        <div class="score-row"><span class="label">机会分</span><span class="value big text-accent">${opp != null ? fmt(opp, 1) : '—'}</span><span class="arrow ${arrowClass(aOpp)}">${aOpp}</span></div>
-        <div class="score-row"><span class="label">信号确认</span><span class="value">${sc != null ? fmt(sc, 0) + '%' : '—'}</span><span class="arrow ${arrowClass(aSc)}">${aSc}</span></div>
-        <div class="score-row"><span class="label">数据可信</span><span class="value">${dc != null ? fmt(dc, 0) + '%' : '—'}</span></div>
+        <div class="score-row"><span class="label">机会分</span><span class="value">${pubOpp != null ? fmt(pubOpp,0) : '—'} → ${curOpp != null ? fmt(curOpp,0) : '—'}</span></div>
+        <div class="score-row"><span class="label">信号确认</span><span class="value">${pubSig != null ? fmt(pubSig,0)+'%' : '—'} → ${curSig != null ? fmt(curSig,0)+'%' : '—'}</span></div>
+        <div class="score-row"><span class="label">数据可信</span><span class="value">${pubDc != null ? fmt(pubDc,0)+'%' : '—'} → ${curDc != null ? fmt(curDc,0)+'%' : '—'}</span></div>
       </div>
-      <div class="sub-tiles">${subTiles}</div>
-      ${summary ? `<div class="card-summary">${escapeHtml(summary)}</div>` : ''}
-      <div class="card-plan">${escapeHtml(planSummary)}</div>
+      ${tfLine ? `<div class="card-meta" style="font-size:0.72rem">${tfLine}</div>` : ''}
+      ${planLine ? `<div class="card-plan">${escapeHtml(planLine)}</div>` : ''}
+      ${s.summary ? `<div class="card-summary">${escapeHtml(s.summary)}</div>` : ''}
     </div>`;
 }
 
@@ -1389,38 +1356,32 @@ async function pollSlow() {
 }
 
 // §54 捕获 30s 稳定窗口趋势
+// V1.4 §三十三：正式推荐 current 值趋势（发布时 vs 当前 ↓）
 function captureScoreTrend(home) {
-  const confirmed = home.confirmed_opportunities || [];
+  const published = home.published_recommendations || [];
   const trend = {};
-  for (const s of confirmed) {
-    trend[s.symbol] = {
-      opp: liveValue(s, 'opportunity_score'),
-      sc: liveValue(s, 'signal_confirmation'),
-      dc: liveValue(s, 'data_confidence'),
-      subs: s.live_subscores || {},
-      accum: s.accumulation_score,
-    };
+  for (const s of published) {
+    trend[s.symbol] = { cur_opp: s.current_opportunity_score };
   }
   State.scoreTrend = trend;
 }
 
-// §12/§66.8 首页不秒级重排：材料变化才重渲染
+// V1.4 §五/§七：首页正式机会是独立对象——成员变化只看 published（rec_id + status）
+// 直到 EXITED/INVALIDATED/EXPIRED 才消失；confirmed/watch 允许快速变化（次级区）
 function homeMateriallyChanged(home) {
   const prev = State.lastRendered.home;
   if (!prev) return true;
-  const confirmed = home.confirmed_opportunities || [];
-  if (confirmed.length !== prev.confirmed.length) return true;
+  const published = home.published_recommendations || [];
+  const prevPub = prev.published || [];
+  if (published.length !== prevPub.length) return true;
+  for (let i = 0; i < published.length; i++) {
+    const a = published[i], b = prevPub[i];
+    if (!b || a.recommendation_id !== b.id) return true;   // 成员变化（发布/退出）
+    if (a.status !== b.status) return true;                 // 状态转移（MONITORING→WEAKENING…）
+  }
+  if ((home.confirmed_opportunities || []).length !== prev.confirmedCount) return true;
   const nowWatch = (home.watch_candidates || []).map(w => w.symbol).join(',');
   if (nowWatch !== prev.watchSymbols) return true;
-  for (let i = 0; i < confirmed.length; i++) {
-    const a = confirmed[i], b = prev.confirmed[i];
-    if (!b || a.symbol !== b.symbol) return true;
-    if (a.state !== b.state || a.direction !== b.direction) return true;
-    const aOpp = snapValue(a, 'opportunity_score'), bOpp = b.opp;
-    if (Math.abs((aOpp || 0) - (bOpp || 0)) > 1) return true;
-    const aSc = snapValue(a, 'signal_confirmation'), bSc = b.sc;
-    if (Math.abs((aSc || 0) - (bSc || 0)) > 1) return true;
-  }
   return false;
 }
 function renderHomeIfChanged(home) {

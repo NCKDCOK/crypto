@@ -176,6 +176,10 @@ class SupervisorEngine:
         return [sym for sym in self.records if self.is_due(sym, now_ms)]
 
     # ── 滞回评估（§10 + §66.2） ────────────────────────────────────────
+    # V1.4 §6 职责边界：本方法只管 symbol 级监督池滞回（是否降级到更低监督池），
+    #   **不控制 PublishedRecommendation 退出**——推荐退出统一由 RecommendationLifecycleEngine
+    #   （tick_fast/tick_slow）决定。三层职责固定：StatePool Supervisor 管池 /
+    #   Recommendation Lifecycle 管推荐存在 / Simulation Supervisor 管模拟仓位。
     def evaluate(
         self,
         symbol: str,
@@ -184,7 +188,7 @@ class SupervisorEngine:
         now_ms: int = 0,
         force: bool = False,
     ) -> SupervisionDecision | None:
-        """执行一次 state-aware 监督评估。
+        """执行一次 state-aware 监督评估（symbol 级池滞回，不管推荐退出）。
 
         `core_conditions_met=False` 表示本 tick 失去该池核心条件（§9 Stay）。
         `vetoes` 中的 hard Veto 立即失效（无视滞回/驻留）。

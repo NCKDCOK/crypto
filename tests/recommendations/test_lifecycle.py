@@ -73,7 +73,7 @@ class TestNormalAndWeakening:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000))
+        d = eng.tick_slow(rec, _ctx(now=1_000))
         assert rec.status == RecommendationStatus.MONITORING
         assert d.transitioned is True
         assert d.new_status == RecommendationStatus.MONITORING
@@ -84,7 +84,7 @@ class TestNormalAndWeakening:
         eng = _engine()
         rec = _rec(opp=80.0)
         eng.register(rec, 0)
-        eng.tick(rec, _ctx(now=1_000, opp=72.0, price=108.0))
+        eng.tick_slow(rec, _ctx(now=1_000, opp=72.0, price=108.0))
         assert rec.current_opportunity_score == 72.0
         assert rec.current_price == 108.0
         assert rec.published_opportunity_score == 80.0   # 冻结
@@ -95,7 +95,7 @@ class TestNormalAndWeakening:
         eng = _engine()
         rec = _rec(opp=80.0)
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, opp=65.0))   # 65 < 70
+        d = eng.tick_slow(rec, _ctx(now=1_000, opp=65.0))   # 65 < 70
         assert rec.status == RecommendationStatus.WEAKENING
         assert rec.is_active() is True                 # 仍在首页活跃区
         assert d.exited is False
@@ -105,7 +105,7 @@ class TestNormalAndWeakening:
         rec = _rec(opp=80.0)
         eng.register(rec, 0)
         for t in (1_000, 2_000, 3_000):
-            eng.tick(rec, _ctx(now=t, opp=66.0))
+            eng.tick_slow(rec, _ctx(now=t, opp=66.0))
         assert rec.status == RecommendationStatus.WEAKENING
         assert rec.is_active() is True
 
@@ -116,7 +116,7 @@ class TestImmediateExits:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, hard_veto=True))
+        d = eng.tick_slow(rec, _ctx(now=1_000, hard_veto=True))
         assert rec.status == RecommendationStatus.INVALIDATED
         assert rec.exit_reason == "HARD_VETO"
         assert rec.closed_at == 1_000
@@ -128,7 +128,7 @@ class TestImmediateExits:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, hard_veto=True))   # 1s < 300s
+        d = eng.tick_slow(rec, _ctx(now=1_000, hard_veto=True))   # 1s < 300s
         assert d.exited is True
         assert rec.status == RecommendationStatus.INVALIDATED
 
@@ -137,7 +137,7 @@ class TestImmediateExits:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, state="WITHDRAWAL",
+        d = eng.tick_slow(rec, _ctx(now=1_000, state="WITHDRAWAL",
                               withdrawal_active=True, in_formal_range=False))
         assert rec.status == RecommendationStatus.EXITED
         assert rec.exit_reason == "SIGNAL_WITHDRAWAL"
@@ -147,7 +147,7 @@ class TestImmediateExits:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, invalidated=True))
+        d = eng.tick_slow(rec, _ctx(now=1_000, invalidated=True))
         assert rec.status == RecommendationStatus.INVALIDATED
         assert rec.exit_reason == "INVALIDATION_HIT"
         assert d.exited is True
@@ -156,7 +156,7 @@ class TestImmediateExits:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, data_critical=True))
+        d = eng.tick_slow(rec, _ctx(now=1_000, data_critical=True))
         assert rec.status == RecommendationStatus.EXITED
         assert rec.exit_reason == "DATA_CRITICAL"
         assert d.exited is True
@@ -168,7 +168,7 @@ class TestRiskPool:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, state="EXHAUSTION",
+        d = eng.tick_slow(rec, _ctx(now=1_000, state="EXHAUSTION",
                               risk_status="EXHAUSTION", in_formal_range=False))
         assert rec.status == RecommendationStatus.RISK
         assert rec.risk_status == "EXHAUSTION"
@@ -179,9 +179,9 @@ class TestRiskPool:
         eng = _engine()
         rec = _rec()
         eng.register(rec, 0)
-        eng.tick(rec, _ctx(now=1_000, state="EXHAUSTION",
+        eng.tick_slow(rec, _ctx(now=1_000, state="EXHAUSTION",
                            risk_status="EXHAUSTION", in_formal_range=False))
-        d = eng.tick(rec, _ctx(now=2_000, state="START_CONFIRMED"))
+        d = eng.tick_slow(rec, _ctx(now=2_000, state="START_CONFIRMED"))
         assert rec.status == RecommendationStatus.MONITORING
         assert rec.risk_status is None
 
@@ -195,7 +195,7 @@ class TestOrdinaryDowngradeHysteresis:
         rec = _rec(published_at=0)
         eng.register(rec, 0)
         # now=100s < 300s min lifetime，state 退到 COOLDOWN（非 withdrawal）
-        d = eng.tick(rec, _ctx(now=100_000, state="COOLDOWN", in_formal_range=False))
+        d = eng.tick_slow(rec, _ctx(now=100_000, state="COOLDOWN", in_formal_range=False))
         assert rec.status == RecommendationStatus.WEAKENING
         assert d.exited is False
         assert rec.is_active() is True
@@ -206,10 +206,10 @@ class TestOrdinaryDowngradeHysteresis:
         rec = _rec(published_at=0)
         eng.register(rec, 0)
         # past min lifetime（now=400s > 300s）
-        d1 = eng.tick(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))
+        d1 = eng.tick_slow(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))
         assert rec.status == RecommendationStatus.WEAKENING   # 1/2，未退出
         assert d1.exited is False
-        d2 = eng.tick(rec, _ctx(now=410_000, state="COOLDOWN", in_formal_range=False))
+        d2 = eng.tick_slow(rec, _ctx(now=410_000, state="COOLDOWN", in_formal_range=False))
         assert rec.status == RecommendationStatus.EXITED        # 2/2，普通降级退出
         assert rec.exit_reason == "STATE_EXIT"
         assert d2.exited is True
@@ -218,7 +218,7 @@ class TestOrdinaryDowngradeHysteresis:
         eng = _engine()
         rec = _rec(published_at=0)
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))
+        d = eng.tick_slow(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))
         assert d.exited is False
         assert rec.status == RecommendationStatus.WEAKENING
 
@@ -227,9 +227,9 @@ class TestOrdinaryDowngradeHysteresis:
         eng = _engine()
         rec = _rec(published_at=0)
         eng.register(rec, 0)
-        eng.tick(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))  # streak=1
-        eng.tick(rec, _ctx(now=410_000, state="START_CONFIRMED"))                 # 恢复 → 清零
-        d = eng.tick(rec, _ctx(now=420_000, state="COOLDOWN", in_formal_range=False))  # streak=1 again
+        eng.tick_slow(rec, _ctx(now=400_000, state="COOLDOWN", in_formal_range=False))  # streak=1
+        eng.tick_slow(rec, _ctx(now=410_000, state="START_CONFIRMED"))                 # 恢复 → 清零
+        d = eng.tick_slow(rec, _ctx(now=420_000, state="COOLDOWN", in_formal_range=False))  # streak=1 again
         assert d.exited is False
         assert rec.status == RecommendationStatus.WEAKENING
 
@@ -242,7 +242,7 @@ class TestTerminalAndRegister:
         rec.exit_reason = "SIGNAL_WITHDRAWAL"
         rec.closed_at = 123
         eng.register(rec, 0)
-        d = eng.tick(rec, _ctx(now=1_000, hard_veto=True))   # 终态：不再转移
+        d = eng.tick_slow(rec, _ctx(now=1_000, hard_veto=True))   # 终态：不再转移
         assert d.transitioned is False
         assert d.exited is False
         assert rec.exit_reason == "SIGNAL_WITHDRAWAL"        # 不被覆盖
@@ -251,7 +251,7 @@ class TestTerminalAndRegister:
         """未显式 register → tick 自动注册。"""
         eng = _engine()
         rec = _rec()
-        d = eng.tick(rec, _ctx(now=1_000))   # 未 register
+        d = eng.tick_slow(rec, _ctx(now=1_000))   # 未 register
         assert rec.status == RecommendationStatus.MONITORING
         assert d.transitioned is True
         assert eng.get_track(rec.recommendation_id) is not None

@@ -72,6 +72,11 @@ class PublishedRecommendation:
     # ── Setup ──
     side: str | None = None         # LONG / SHORT
     setup_type: str = ""
+    # V1.4 修复：主周期拆三段（§四 trigger=5m 收盘 / §3.2 confirmation=15m / context=1h）
+    trigger_timeframe: str = "5m"        # 正式触发绑定的新 5m 收盘
+    confirmation_timeframe: str = "15m"  # 强确认周期
+    context_timeframe: str = "1h"        # 上下文同向周期
+    # 废弃别名（保留向后兼容；to_dict 映射为 trigger_timeframe，禁止新代码使用）
     primary_timeframe: str = "15m"
 
     # ── 发布时冻结（§二十七：不可变）──
@@ -118,7 +123,10 @@ class PublishedRecommendation:
             "closed_at": self.closed_at,
             "side": self.side,
             "setup_type": self.setup_type,
-            "primary_timeframe": self.primary_timeframe,
+            "trigger_timeframe": self.trigger_timeframe,
+            "confirmation_timeframe": self.confirmation_timeframe,
+            "context_timeframe": self.context_timeframe,
+            "primary_timeframe": self.trigger_timeframe,   # 废弃别名=trigger
             "published_state": self.published_state,
             "current_state": self.current_state,
             "published_price": self.published_price,
@@ -155,7 +163,10 @@ class PublishedRecommendation:
             closed_at=d.get("closed_at"),
             side=d.get("side"),
             setup_type=d.get("setup_type", ""),
-            primary_timeframe=d.get("primary_timeframe", "15m"),
+            trigger_timeframe=d.get("trigger_timeframe", "5m"),
+            confirmation_timeframe=d.get("confirmation_timeframe", "15m"),
+            context_timeframe=d.get("context_timeframe", "1h"),
+            primary_timeframe=d.get("primary_timeframe", "5m"),
             published_state=d.get("published_state", ""),
             current_state=d.get("current_state"),
             published_price=d.get("published_price"),

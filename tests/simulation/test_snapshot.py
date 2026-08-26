@@ -95,79 +95,9 @@ class TestSameSetupVersioned:
         assert a2.snapshot_id.endswith("-002")
 
 
-class TestGate:
-    """§13/§22 门槛：state∈正式范围、分数达标、Trade Plan 合法、非 stale、非 pump_risk_high。"""
-
-    def _gate(self, svc, **over):
-        kw = dict(
-            state="START_CONFIRMED",
-            opportunity_score=85.0,
-            signal_confirmation=88.0,
-            data_confidence=92.0,
-            trade_plan={"status": "ACTIVE"},
-            pump_risk=10.0,
-            stale_flag=None,
-        )
-        kw.update(over)
-        return svc.passes_gate(**kw)
-
-    def test_start_confirmed_passes(self):
-        svc = _service()
-        assert self._gate(svc) is True
-
-    def test_continuation_passes(self):
-        svc = _service()
-        assert self._gate(svc, state="CONTINUATION") is True
-
-    def test_cooldown_rejected(self):
-        """§66.4：COOLDOWN 不加入正式模拟。"""
-        svc = _service()
-        assert self._gate(svc, state="COOLDOWN") is False
-
-    def test_suspected_start_rejected(self):
-        """§66.4：SUSPECTED_START 不加入正式模拟。"""
-        svc = _service()
-        assert self._gate(svc, state="SUSPECTED_START") is False
-
-    def test_low_opportunity_rejected(self):
-        svc = _service()
-        assert self._gate(svc, opportunity_score=69.0) is False
-
-    def test_low_signal_confirmation_rejected(self):
-        svc = _service()
-        assert self._gate(svc, signal_confirmation=74.0) is False
-
-    def test_low_data_confidence_rejected(self):
-        svc = _service()
-        assert self._gate(svc, data_confidence=84.0) is False
-
-    def test_inactive_trade_plan_rejected(self):
-        svc = _service()
-        assert self._gate(svc, trade_plan={"status": "EXPIRED"}) is False
-
-    def test_missing_trade_plan_rejected(self):
-        svc = _service()
-        assert self._gate(svc, trade_plan=None) is False
-
-    def test_stale_rejected(self):
-        svc = _service()
-        assert self._gate(svc, stale_flag=1.0) is False
-
-    def test_pump_risk_high_rejected(self):
-        svc = _service()
-        assert self._gate(svc, pump_risk=70.0) is False
-
-    def test_thresholds_configurable(self):
-        svc = _service(min_opportunity=90.0)
-        assert svc.passes_gate(
-            state="START_CONFIRMED", opportunity_score=89.0,
-            signal_confirmation=88.0, data_confidence=92.0,
-            trade_plan={"status": "ACTIVE"}, pump_risk=10.0, stale_flag=None,
-        ) is False
-
-    def test_state_enum_accepted(self):
-        svc = _service()
-        assert self._gate(svc, state=State.START_CONFIRMED) is True
+# V1.4 §2：旧 passes_gate 门槛已删——正式推荐门槛统一由 RecommendationGate（§三）判定，
+# 门槛语义测试见 tests/recommendations/test_recommendation_gate.py。
+# RecommendationSnapshot 现在由 runtime 在发布正式推荐时冻结，绑定 recommendation_id。
 
 
 class TestBuild:
@@ -191,12 +121,21 @@ class TestBuild:
             structure_state=snapshot_dict["structure_state"],
             spot_perp_state=snapshot_dict["spot_perp_state"],
             trade_plan=snapshot_dict["trade_plan"],
+            recommendation_id="REC-TEST123",
         )
         d = snap.to_dict()
         assert d["state"] == "START_CONFIRMED"
         assert d["direction"] == "LONG"
         assert d["trade_plan"]["reference_entry_low"] == 95.0
         assert d["all_evidence"][0]["passed"] is True
+        # V1.4 §2：快照绑定发布它的正式推荐 id
+        assert d["recommendation_id"] == "REC-TEST123"
+        assert snap.recommendation_id == "REC-TEST123"
+
+    def test_build_recommendation_id_defaults_none(self, snapshot_dict):
+        svc = _service()
+        snap = svc.build(**_passing_kwargs())
+        assert snap.recommendation_id is None
 
     def test_primary_timeframe_configurable(self):
         svc = _service(primary_timeframe="1h")

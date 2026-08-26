@@ -53,6 +53,8 @@ class RecommendationSnapshot:
     structure_state: dict[str, Any]
     spot_perp_state: dict[str, Any]
     trade_plan: dict[str, Any]
+    # V1.4 §2：绑定发布它的正式推荐 id（无 recommendation_id 禁止进模拟）
+    recommendation_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +62,7 @@ class RecommendationSnapshot:
             "symbol": self.symbol,
             "timestamp": self.timestamp,
             "market_regime": self.market_regime,
+            "recommendation_id": self.recommendation_id,
             "state": self.state,
             "setup_type": self.setup_type,
             "direction": self.direction,
@@ -81,31 +84,14 @@ class RecommendationSnapshot:
 class RecommendationSnapshotService:
     """§22 正式推荐 → 自动快照。
 
-    门槛（§13/§62，全部配置化，runtime 从 cfg.ranking 注入）：
-    - state ∈ {START_CONFIRMED, CONTINUATION}
-    - opportunity_score >= min_opportunity
-    - signal_confirmation >= min_signal_confirmation
-    - data_confidence >= min_data_confidence
-    - Trade Plan 合法（status == ACTIVE）
-    - 非 stale、pump_risk 不高于上限
+    V1.4 §2：正式推荐门槛统一由 RecommendationGate（§三）判定——通过 → 发布
+    PublishedRecommendation → 此处 build 冻结快照。本服务不再独立判定门槛
+    （旧 passes_gate 已删除，禁止第二套真相）。冻结后不可修改（§21）。
 
-    去重（§19 版本管理）：runtime 以 trade_plan_id 为准，同一正式计划只冻结一份。
     snapshot_id 格式（§42 风格）：{SYMBOL}-{YYYYMMDD}-{NNN}
     """
 
-    def __init__(
-        self,
-        *,
-        min_opportunity: float = 70.0,
-        min_signal_confirmation: float = 75.0,
-        min_data_confidence: float = 85.0,
-        max_pump_risk: float = 50.0,
-        primary_timeframe: str = "15m",
-    ) -> None:
-        self.min_opportunity = min_opportunity
-        self.min_signal_confirmation = min_signal_confirmation
-        self.min_data_confidence = min_data_confidence
-        self.max_pump_risk = max_pump_risk
+    def __init__(self, *, primary_timeframe: str = "5m") -> None:
         self.primary_timeframe = primary_timeframe
         self._seq: dict[str, int] = {}
 
@@ -115,34 +101,8 @@ class RecommendationSnapshotService:
         date = datetime.fromtimestamp(timestamp / 1000.0, tz=timezone.utc).strftime("%Y%m%d")
         return f"{symbol}-{date}-{seq:03d}"
 
-    def passes_gate(
-        self,
-        *,
-        state: Any,
-        opportunity_score: float | None,
-        signal_confirmation: float | None,
-        data_confidence: float | None,
-        trade_plan: dict[str, Any] | None,
-        pump_risk: float | None,
-        stale_flag: float | None,
-    ) -> bool:
-        """§13 门槛判定。任一不满足 → False（不产生正式推荐）。"""
-        if state is None or str(getattr(state, "value", state)) not in FORMAL_STATES:
-            return False
-        if opportunity_score is None or opportunity_score < self.min_opportunity:
-            return False
-        if signal_confirmation is None or signal_confirmation < self.min_signal_confirmation:
-            return False
-        if data_confidence is None or data_confidence < self.min_data_confidence:
-            return False
-        plan = trade_plan or {}
-        if plan.get("status") != "ACTIVE":
-            return False
-        if stale_flag:
-            return False
-        if pump_risk is not None and pump_risk > self.max_pump_risk:
-            return False
-        return True
+    # V1.4 §2：删旧 passes_gate —— 正式推荐门槛统一由 RecommendationGate（§三）判定，
+    # 通过 → 发布 PublishedRecommendation → 此处 build 冻结快照。禁止第二套门槛。
 
     def build(
         self,
@@ -164,13 +124,15 @@ class RecommendationSnapshotService:
         structure_state: dict[str, Any],
         spot_perp_state: dict[str, Any],
         trade_plan: dict[str, Any],
+        recommendation_id: str | None = None,
     ) -> RecommendationSnapshot:
-        """冻结一份不可变快照（§20 全字段）。"""
+        """冻结一份不可变快照（§20 全字段），绑定发布它的正式推荐 id。"""
         return RecommendationSnapshot(
             snapshot_id=self._make_id(symbol, timestamp),
             symbol=symbol,
             timestamp=timestamp,
             market_regime=dict(market_regime or {}),
+            recommendation_id=recommendation_id,
             state=str(getattr(state, "value", state)),
             setup_type=setup_type,
             direction=direction,
